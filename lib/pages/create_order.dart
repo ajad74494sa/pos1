@@ -29,7 +29,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
   List locationListMap = [];
   
   int selectedLocationId = 0;
-  int selectedContactId = 1; // Default walk-in
+  int? selectedContactId;
   int offset = 0;
   bool isLoading = false;
   bool isProcessing = false;
@@ -135,8 +135,20 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
     }
   }
 
+  bool get hasValidCustomerSelection =>
+      selectedContactId != null &&
+      contacts.any((contact) =>
+          int.tryParse(contact['id'].toString()) == selectedContactId);
+
+  bool _requireCustomerSelection() {
+    if (hasValidCustomerSelection) return true;
+    Helper().showNotification(context, 'Select a customer', isError: true);
+    return false;
+  }
+
   Future<void> submitDraft() async {
     if (cartItems.isEmpty) return;
+    if (!_requireCustomerSelection()) return;
     setState(() => isProcessing = true);
     try {
       String invoiceNo = await Helper().generateRefNumber('sell', locationId: selectedLocationId);
@@ -179,6 +191,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
 
   Future<void> submitOrder(List payments) async {
     if (cartItems.isEmpty) return;
+    if (!_requireCustomerSelection()) return;
     setState(() => isProcessing = true);
     try {
       String invoiceNo = await Helper().generateRefNumber('sell', locationId: selectedLocationId);
@@ -291,6 +304,33 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                 productList();
               });
             },
+          ),
+          SizedBox(height: MySize.size12!),
+          DropdownButtonFormField<int>(
+            isExpanded: true,
+            initialValue: hasValidCustomerSelection ? selectedContactId : null,
+            decoration: const InputDecoration(
+              labelText: 'Customer',
+              border: OutlineInputBorder(),
+            ),
+            hint: Text(
+              contacts.isEmpty ? 'No customers available' : 'Select customer',
+            ),
+            items: contacts
+                .where((contact) =>
+                    int.tryParse(contact['id'].toString()) != null)
+                .map<DropdownMenuItem<int>>((contact) {
+              return DropdownMenuItem<int>(
+                value: int.parse(contact['id'].toString()),
+                child: Text(
+                  (contact['name'] ?? 'Unnamed customer').toString(),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              );
+            }).toList(),
+            onChanged: contacts.isEmpty
+                ? null
+                : (value) => setState(() => selectedContactId = value),
           ),
           SizedBox(height: MySize.size12!),
           TextField(
