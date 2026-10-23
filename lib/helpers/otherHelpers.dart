@@ -1,7 +1,8 @@
-
 import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+
 import 'package:barcode_scan2/barcode_scan2.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/foundation.dart';
@@ -15,9 +16,9 @@ import 'package:lottie/lottie.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:permission_handler/permission_handler.dart';
 // printing removed — print/save functions are no-ops
-import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unified_esc_pos_printer/unified_esc_pos_printer.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -44,6 +45,85 @@ class Helper {
   CustomAppTheme customAppTheme = AppTheme.getCustomAppTheme(themeType);
 
   static final Map<String, img.Image> _logoCache = {};
+  static CapabilityProfile? _printerCapabilityProfile;
+  static Future<img.Image?>? _businessLogoLoad;
+  static String? _businessLogoCacheUrl;
+
+  Future<void> preloadBusinessLogo() async {
+    try {
+      final businessInfo = await getFormattedBusinessDetails();
+      final logo = businessInfo['logo']?.toString();
+      if (logo != null && logo.trim().isNotEmpty) {
+        await _loadBusinessLogo(logo);
+      }
+    } catch (e) {
+      debugPrint('Unable to preload business logo: $e');
+    }
+  }
+
+  Future<img.Image?> _loadBusinessLogo(String? logo) async {
+    final logoPath = logo?.trim() ?? '';
+    if (logoPath.isEmpty) return null;
+
+    final logoUri = Uri.tryParse(logoPath);
+    if (logoUri == null) {
+      throw FormatException('Invalid business logo URL: $logoPath');
+    }
+    final uri = logoUri.hasScheme
+        ? logoUri
+        : Uri.parse('${Config.baseUrl}/').resolve(logoPath);
+    final cacheKey = uri.toString();
+    final cachedLogo = _logoCache[cacheKey];
+    if (cachedLogo != null) return cachedLogo;
+
+    if (_businessLogoLoad != null && _businessLogoCacheUrl == cacheKey) {
+      return await _businessLogoLoad!;
+    }
+    _businessLogoCacheUrl = cacheKey;
+    final pendingLoad = _loadAndCacheBusinessLogo(uri, cacheKey);
+    _businessLogoLoad = pendingLoad;
+    try {
+      return await pendingLoad;
+    } finally {
+      if (identical(_businessLogoLoad, pendingLoad)) {
+        _businessLogoLoad = null;
+      }
+    }
+  }
+
+  Future<img.Image?> _loadAndCacheBusinessLogo(Uri uri, String cacheKey) async {
+    final directory = await getApplicationSupportDirectory();
+    final cacheFile = File(
+      '${directory.path}${Platform.pathSeparator}business_logo_cache.png',
+    );
+    final preferences = await SharedPreferences.getInstance();
+    final cachedUrl = preferences.getString('business_logo_cache_url');
+
+    if (cachedUrl == cacheKey && await cacheFile.exists()) {
+      final image = img.decodeImage(await cacheFile.readAsBytes());
+      if (image != null) {
+        _logoCache[cacheKey] = image;
+        return image;
+      }
+    }
+
+    final response = await http.get(uri).timeout(const Duration(seconds: 5));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw HttpException(
+        'Business logo request failed with HTTP ${response.statusCode}',
+        uri: uri,
+      );
+    }
+    final image = img.decodeImage(response.bodyBytes);
+    if (image == null) {
+      throw const FormatException('Business logo is not a supported image');
+    }
+    final resizedImage = img.copyResize(image, width: 200);
+    _logoCache[cacheKey] = resizedImage;
+    await cacheFile.writeAsBytes(img.encodePng(resizedImage), flush: true);
+    await preferences.setString('business_logo_cache_url', cacheKey);
+    return resizedImage;
+  }
 
   String trimText(String text, int length) {
     if (text.length <= length) return text;
@@ -51,9 +131,15 @@ class Helper {
   }
 
   // ZATCA TLV Generator
-  String generateZatcaQr(String sellerName, String vatNumber, String timestamp, double totalAmount, double vatAmount) {
+  String generateZatcaQr(
+    String sellerName,
+    String vatNumber,
+    String timestamp,
+    double totalAmount,
+    double vatAmount,
+  ) {
     BytesBuilder builder = BytesBuilder();
-    
+
     // Tag 1: Seller Name
     builder.addByte(1);
     builder.addByte(utf8.encode(sellerName).length);
@@ -84,7 +170,11 @@ class Helper {
     return base64.encode(builder.toBytes());
   }
 
-  Widget loadingIndicator(BuildContext context, {String? subTitle, bool showBackground = true}) {
+  Widget loadingIndicator(
+    BuildContext context, {
+    String? subTitle,
+    bool showBackground = true,
+  }) {
     return Center(
       child: Container(
         width: 280,
@@ -93,14 +183,21 @@ class Helper {
         decoration: BoxDecoration(
           color: showBackground ? const Color(0xFF050A0A) : Colors.transparent,
           borderRadius: BorderRadius.circular(32),
-          border: showBackground ? Border.all(color: const Color(0xFF00E5FF).withOpacity(0.2), width: 1) : null,
-          boxShadow: showBackground ? [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.6),
-              blurRadius: 20,
-              spreadRadius: 5,
-            )
-          ] : null,
+          border: showBackground
+              ? Border.all(
+                  color: const Color(0xFF00E5FF).withOpacity(0.2),
+                  width: 1,
+                )
+              : null,
+          boxShadow: showBackground
+              ? [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.6),
+                    blurRadius: 20,
+                    spreadRadius: 5,
+                  ),
+                ]
+              : null,
         ),
         alignment: Alignment.center,
         child: FuturisticLoader(
@@ -116,8 +213,11 @@ class Helper {
     showNotification(context, msg);
   }
 
-  void showNotification(BuildContext context, String message,
-      {bool isError = false}) {
+  void showNotification(
+    BuildContext context,
+    String message, {
+    bool isError = false,
+  }) {
     try {
       final overlay = Overlay.of(context);
       if (overlay == null) {
@@ -150,8 +250,9 @@ class Helper {
     double convertAmount = double.parse(amount.toString());
 
     var amt = NumberFormat.currency(
-            symbol: '', decimalDigits: Config.currencyPrecision)
-        .format(convertAmount);
+      symbol: '',
+      decimalDigits: Config.currencyPrecision,
+    ).format(convertAmount);
     return amt;
   }
 
@@ -168,21 +269,23 @@ class Helper {
   String formatQuantity(amount) {
     double quantity = double.parse(amount.toString());
     var amt = NumberFormat.currency(
-            symbol: '', decimalDigits: Config.quantityPrecision)
-        .format(quantity);
+      symbol: '',
+      decimalDigits: Config.quantityPrecision,
+    ).format(quantity);
     return amt;
   }
 
   //argument model
-  Map argument(
-      {int? sellId,
-      int? locId,
-      int? taxId,
-      String? discountType,
-      double? discountAmount,
-      double? invoiceAmount,
-      int? customerId,
-      int? isQuotation}) {
+  Map argument({
+    int? sellId,
+    int? locId,
+    int? taxId,
+    String? discountType,
+    double? discountAmount,
+    double? invoiceAmount,
+    int? customerId,
+    int? isQuotation,
+  }) {
     Map args = {
       'sellId': sellId,
       'locationId': locId,
@@ -191,7 +294,7 @@ class Helper {
       'discountAmount': discountAmount,
       'invoiceAmount': invoiceAmount,
       'customerId': customerId,
-      'is_quotation': isQuotation
+      'is_quotation': isQuotation,
     };
     return args;
   }
@@ -213,7 +316,7 @@ class Helper {
   }
 
   //get location name by location_id
-  Future<String?> getLocationNameById( id) async {
+  Future<String?> getLocationNameById(id) async {
     String? locationName;
     var response = await System().get('location');
     response.forEach((element) {
@@ -225,8 +328,12 @@ class Helper {
   }
 
   //calculate inline tax and discount amount
-  calculateTaxAndDiscount(
-      {discountAmount, discountType, taxId, unitPrice}) async {
+  calculateTaxAndDiscount({
+    discountAmount,
+    discountType,
+    taxId,
+    unitPrice,
+  }) async {
     double disAmt = 0.0, tax = 0.00, taxAmt = 0.00;
     await System().get('tax').then((value) {
       value.forEach((element) {
@@ -278,23 +385,38 @@ class Helper {
   }
 
   //function for formatting invoice
-  Future<void> printDocument(sellId, taxId, context, {invoice, bool keepAlive = false, bool isManual = false}) async {
+  Future<void> printDocument(
+    sellId,
+    taxId,
+    context, {
+    invoice,
+    bool keepAlive = false,
+    bool isManual = false,
+  }) async {
     final printerService = PrinterService();
-    
+
     // Auto print logic: skip if printCustomerCopy is off and this is NOT a manual request
     if (!isManual && !printerService.printCustomerCopy) {
       debugPrint("Auto-print customer invoice is disabled. Skipping.");
       return;
     }
-    
+
     // Auto print if printer is configured, else show notification
     if (printerService.customerDevice == null) {
-      showNotification(context, "Sale completed. Printer not configured.", isError: false);
+      showNotification(
+        context,
+        "Sale completed. Printer not configured.",
+        isError: false,
+      );
       return;
     }
-    
+
     if (!printerService.isPrintingEnabled) {
-      showNotification(context, "Sale completed. Printing is disabled.", isError: false);
+      showNotification(
+        context,
+        "Sale completed. Printing is disabled.",
+        isError: false,
+      );
       return;
     }
 
@@ -313,7 +435,10 @@ class Helper {
 
       // Location details
       List locations = await System().get('location');
-      var location = locations.firstWhere((element) => element['id'] == sell['location_id'], orElse: () => null);
+      var location = locations.firstWhere(
+        (element) => element['id'] == sell['location_id'],
+        orElse: () => null,
+      );
       String locationAddress = 'FMGF+737, Al Haqu 87261, Al Haqu, Saudi Arabia';
       if (location != null) {
         locationAddress = [
@@ -321,219 +446,374 @@ class Helper {
           location['city'],
           location['state'],
           location['zip_code'],
-          location['country']
+          location['country'],
         ].where((e) => e != null && e.toString().isNotEmpty).join(', ');
       }
 
       String invoiceNo = sell['invoice_no'];
       String invoiceDisplay = invoiceNo;
-      if (invoiceNo.contains('-')) {
-        var parts = invoiceNo.split('-');
-        String year = DateFormat('yyyy').format(DateTime.now());
-        invoiceDisplay = "$year-${parts.last}";
-      }
 
       String dateTimeStr = sell['transaction_date'];
-      String formattedDate = DateFormat("dd-MM-yyyy HH:mm").format(DateTime.parse(dateTimeStr));
+      String formattedDate = DateFormat("dd-MM-yyyy HH:mm")
+          .format(DateTime.parse(dateTimeStr));
 
       // Products fetch
       List products = await SellDatabase().get(sellId: sellId);
+      final taxes = await System().get('tax') as List;
+      final taxRates = <String, double>{
+        for (final tax in taxes)
+          tax['id'].toString(): double.tryParse(tax['amount'].toString()) ?? 0,
+      };
       double subTotal = 0.00;
       double totalTax = 0.00;
-      double totalDiscount = 0.00;
 
-      final profile = await CapabilityProfile.load();
+      final profile = _printerCapabilityProfile ??=
+          await CapabilityProfile.load();
       final Ticket ticket = Ticket(PaperSize.mm80, profile);
 
       // 1. Logo
       try {
-        final ByteData data = await rootBundle.load('assets/logo/Blue Modern Up Arrow Illustration Financial Business Logo (1).png');
-        final Uint8List bytes = data.buffer.asUint8List();
-        final img.Image? image = img.decodeImage(bytes);
+        final logo = (businessInfo['logo'] ?? '').toString().trim();
+        final logoUri = Uri.tryParse(logo);
+        final resolvedLogoUri = logoUri == null
+            ? null
+            : logoUri.hasScheme
+            ? logoUri
+            : Uri.parse('${Config.baseUrl}/').resolve(logo);
+        final image = resolvedLogoUri == null
+            ? null
+            : _logoCache[resolvedLogoUri.toString()];
         if (image != null) {
-          img.Image resized = img.copyResize(image, width: 200);
-          ticket.imageRaster(resized, align: PrintAlign.center);
+          ticket.imageRaster(image, align: PrintAlign.center);
+        } else {
+          unawaited(preloadBusinessLogo());
         }
       } catch (e) {
-        debugPrint('Error loading logo: $e');
+        debugPrint('Unable to load business logo for invoice: $e');
       }
 
       // 2. Header
-      await ticket.textRaster('$businessNameAr | $businessName',
-          style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold), 
-          align: PrintAlign.center);
-      
-      await ticket.textRaster(locationAddress, 
-          style: const TextStyle(fontSize: 18), 
-          align: PrintAlign.center);
-      
-      await ticket.textRaster('Mobile: ${businessInfo['mobile'] ?? '0552561609'}', 
-          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold), 
-          align: PrintAlign.center);
-      
-      await ticket.textRaster('فاتوره', 
-          style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold), 
-          align: PrintAlign.center);
+      await ticket.textRaster(
+        '$businessName',
+        style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
+        align: PrintAlign.center,
+      );
+
+      await ticket.textRaster(
+        locationAddress,
+        style: const TextStyle(fontSize: 18),
+        align: PrintAlign.center,
+      );
+
+      await ticket.textRaster(
+        'Mobile: ${businessInfo['mobile'] ?? ''}',
+        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+        align: PrintAlign.center,
+      );
+
+      await ticket.textRaster(
+        'فاتوره',
+        style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+        align: PrintAlign.center,
+      );
 
       // 3. Metadata Info
       await ticket.rowRaster([
-        PrintRasterColumn(text: 'رقم الفاتوره', flex: 2, style: const TextStyle(fontWeight: FontWeight.bold)),
-        PrintRasterColumn(text: invoiceDisplay, flex: 3, align: PrintAlign.right),
+        PrintRasterColumn(
+          text: 'رقم الفاتوره',
+          flex: 2,
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        PrintRasterColumn(
+          text: invoiceDisplay,
+          flex: 3,
+          align: PrintAlign.right,
+        ),
       ]);
       await ticket.rowRaster([
-        PrintRasterColumn(text: 'يوم', flex: 1, style: const TextStyle(fontWeight: FontWeight.bold)),
-        PrintRasterColumn(text: formattedDate, flex: 2, align: PrintAlign.right),
-      ]);
-      
-      final user = await System().get('loggedInUser');
-      String salesMan = '${user['surname'] ?? ''} ${user['first_name']} ${user['last_name'] ?? ''}'.trim();
-      await ticket.rowRaster([
-        PrintRasterColumn(text: 'مبيعات|Sales Mane', flex: 2, style: const TextStyle(fontWeight: FontWeight.bold)),
-        PrintRasterColumn(text: salesMan, flex: 3, align: PrintAlign.right),
+        PrintRasterColumn(
+          text: 'يوم',
+          flex: 1,
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        PrintRasterColumn(
+          text: formattedDate,
+          flex: 2,
+          align: PrintAlign.right,
+        ),
       ]);
 
+      final user = await System().get('loggedInUser');
+      String salesMan =
+          '${user['surname'] ?? ''} ${user['first_name']} ${user['last_name'] ?? ''}'
+              .trim();
       await ticket.rowRaster([
-        PrintRasterColumn(text: 'Table', flex: 1, style: const TextStyle(fontWeight: FontWeight.bold)),
-        PrintRasterColumn(text: '1', flex: 1, align: PrintAlign.right),
+        PrintRasterColumn(
+          text: 'مبيعات|Sales Mane',
+          flex: 2,
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        PrintRasterColumn(text: salesMan, flex: 3, align: PrintAlign.right),
       ]);
 
       if (customer != null) {
         await ticket.rowRaster([
           PrintRasterColumn(text: 'اسم العميل', flex: 1),
-          PrintRasterColumn(text: customer['name'] ?? '', flex: 2, align: PrintAlign.right),
+          PrintRasterColumn(
+            text: customer['name'] ?? '',
+            flex: 2,
+            align: PrintAlign.right,
+          ),
         ]);
         if (customer['mobile'] != null) {
           await ticket.rowRaster([
             PrintRasterColumn(text: 'Mobile', flex: 1),
-            PrintRasterColumn(text: customer['mobile'], flex: 2, align: PrintAlign.right),
+            PrintRasterColumn(
+              text: customer['mobile'],
+              flex: 2,
+              align: PrintAlign.right,
+            ),
           ]);
         }
       }
-
-      await ticket.rowRaster([
-        PrintRasterColumn(text: 'Reward', flex: 1),
-        PrintRasterColumn(text: '168', flex: 1, align: PrintAlign.right),
-      ]);
 
       ticket.separator();
 
       // 4. Products Table
       await ticket.rowRaster([
-        PrintRasterColumn(text: '#', flex: 1, style: const TextStyle(fontWeight: FontWeight.bold)),
-        PrintRasterColumn(text: 'منتج', flex: 4, style: const TextStyle(fontWeight: FontWeight.bold)),
-        PrintRasterColumn(text: 'كمية', flex: 3, align: PrintAlign.center, style: const TextStyle(fontWeight: FontWeight.bold)),
-        PrintRasterColumn(text: 'سعر الوحدة', flex: 2, align: PrintAlign.center, style: const TextStyle(fontWeight: FontWeight.bold)),
-        PrintRasterColumn(text: 'المجموع الكلي', flex: 2, align: PrintAlign.right, style: const TextStyle(fontWeight: FontWeight.bold)),
+        PrintRasterColumn(
+          text: '#',
+          flex: 1,
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        PrintRasterColumn(
+          text: 'منتج',
+          flex: 4,
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        PrintRasterColumn(
+          text: 'كمية',
+          flex: 3,
+          align: PrintAlign.center,
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        PrintRasterColumn(
+          text: 'سعر الوحدة',
+          flex: 2,
+          align: PrintAlign.center,
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        PrintRasterColumn(
+          text: 'المجموع الكلي',
+          flex: 2,
+          align: PrintAlign.right,
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
       ]);
       ticket.separator();
 
       int totalItemsCount = 0;
       for (int i = 0; i < products.length; i++) {
-        double quantity = double.tryParse(products[i]['quantity']?.toString() ?? '0') ?? 0;
+        double quantity =
+            double.tryParse(products[i]['quantity']?.toString() ?? '0') ?? 0;
         totalItemsCount += quantity.toInt();
-        
-        var dAmount = double.tryParse(products[i]['discount_amount']?.toString() ?? '0') ?? 0.0;
-        var dType = products[i]['discount_type'] ?? 'fixed';
-        var uPrice = double.tryParse(products[i]['unit_price']?.toString() ?? '0') ?? 0.0;
-        var tRateId = products[i]['tax_rate_id'];
 
-        Map<String, dynamic> inlineAmounts = await calculateTaxAndDiscount(
-            discountAmount: dAmount,
-            discountType: dType,
-            unitPrice: uPrice,
-            taxId: tRateId);
-            
-        totalDiscount += (inlineAmounts['discountAmount'] ?? 0) * quantity;
-        totalTax += (inlineAmounts['taxAmount'] ?? 0) * quantity;
-        
-        String productPriceStr = await calculateTotal(
-            taxId: tRateId,
-            discountAmount: dAmount,
-            discountType: dType,
-            unitPrice: uPrice);
-        
-        double productPrice = double.tryParse(productPriceStr) ?? 0;
+        var dAmount =
+            double.tryParse(
+              products[i]['discount_amount']?.toString() ?? '0',
+            ) ??
+            0.0;
+        var dType = products[i]['discount_type'] ?? 'fixed';
+        var uPrice =
+            double.tryParse(products[i]['unit_price']?.toString() ?? '0') ??
+            0.0;
+        var tRateId = products[i]['tax_rate_id'];
+        final taxRate = taxRates[tRateId.toString()] ?? 0;
+        final discount = dType == 'fixed' ? dAmount : uPrice * dAmount / 100;
+        final discountedPrice = uPrice - discount;
+        final inlineTax = discountedPrice * taxRate / 100;
+
+        totalTax += inlineTax * quantity;
+
+        final productPrice =
+            double.tryParse((discountedPrice + inlineTax).toStringAsFixed(2)) ??
+            0;
         double totalProductPrice = quantity * productPrice;
         subTotal += totalProductPrice;
 
         await ticket.rowRaster([
           PrintRasterColumn(text: '${i + 1}', flex: 1),
           PrintRasterColumn(text: products[i]['name'] ?? '', flex: 4),
-          PrintRasterColumn(text: '${quantity.toStringAsFixed(3)}\nPc(s)', flex: 3, align: PrintAlign.center),
-          PrintRasterColumn(text: productPrice.toStringAsFixed(2), flex: 2, align: PrintAlign.center),
-          PrintRasterColumn(text: totalProductPrice.toStringAsFixed(2), flex: 2, align: PrintAlign.right),
+          PrintRasterColumn(
+            text: '${quantity.toStringAsFixed(3)}\nPc(s)',
+            flex: 3,
+            align: PrintAlign.center,
+          ),
+          PrintRasterColumn(
+            text: productPrice.toStringAsFixed(2),
+            flex: 2,
+            align: PrintAlign.center,
+          ),
+          PrintRasterColumn(
+            text: totalProductPrice.toStringAsFixed(2),
+            flex: 2,
+            align: PrintAlign.right,
+          ),
         ]);
       }
       ticket.separator();
 
       // 5. Summary
-      double finalTotal = (double.tryParse(sell['invoice_amount']?.toString() ?? '0') ?? 0.0);
+      double finalTotal =
+          (double.tryParse(sell['invoice_amount']?.toString() ?? '0') ?? 0.0);
 
       await ticket.rowRaster([
-        PrintRasterColumn(text: 'Total items', flex: 2, align: PrintAlign.right),
-        PrintRasterColumn(text: '$totalItemsCount', flex: 1, align: PrintAlign.right),
+        PrintRasterColumn(
+          text: 'Total items',
+          flex: 2,
+          align: PrintAlign.right,
+        ),
+        PrintRasterColumn(
+          text: '$totalItemsCount',
+          flex: 1,
+          align: PrintAlign.right,
+        ),
       ]);
 
       await ticket.rowRaster([
-        PrintRasterColumn(text: 'Subtotal|المجموع الكلي:', flex: 2, align: PrintAlign.left, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-        PrintRasterColumn(text: '${subTotal.toStringAsFixed(2)} ريال', flex: 1, align: PrintAlign.right, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+        PrintRasterColumn(
+          text: 'Subtotal|المجموع الكلي:',
+          flex: 2,
+          align: PrintAlign.left,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+        ),
+        PrintRasterColumn(
+          text: '${subTotal.toStringAsFixed(2)} ريال',
+          flex: 1,
+          align: PrintAlign.right,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+        ),
       ]);
 
       await ticket.rowRaster([
-        PrintRasterColumn(text: 'Total | المجموع:', flex: 2, align: PrintAlign.left, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 22)),
-        PrintRasterColumn(text: '${finalTotal.toStringAsFixed(2)} ريال', flex: 1, align: PrintAlign.right, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 22)),
+        PrintRasterColumn(
+          text: 'Total | المجموع:',
+          flex: 2,
+          align: PrintAlign.left,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 22),
+        ),
+        PrintRasterColumn(
+          text: '${finalTotal.toStringAsFixed(2)} ريال',
+          flex: 1,
+          align: PrintAlign.right,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 22),
+        ),
       ]);
-      
+
       // 6. Payments
-      List paymentList = await PaymentDatabase().get(sell['id'], allColumns: true);
+      List paymentList = await PaymentDatabase().get(
+        sell['id'],
+        allColumns: true,
+      );
       double totalPaidAmount = 0.0;
       for (var element in paymentList) {
         double amt = double.tryParse(element['amount'].toString()) ?? 0;
-        if (element['is_return'] == 0) totalPaidAmount += amt;
-        else totalPaidAmount -= amt;
-        
+        if (element['is_return'] == 0)
+          totalPaidAmount += amt;
+        else
+          totalPaidAmount -= amt;
+
         if (amt > 0) {
           String method = element['method'] ?? 'Cash';
           String payDate = formattedDate.split(' ')[0];
           await ticket.rowRaster([
-            PrintRasterColumn(text: '$method ($payDate)', flex: 2, align: PrintAlign.right),
-            PrintRasterColumn(text: '${amt.toStringAsFixed(2)} ريال', flex: 1, align: PrintAlign.right),
+            PrintRasterColumn(
+              text: '$method ($payDate)',
+              flex: 2,
+              align: PrintAlign.right,
+            ),
+            PrintRasterColumn(
+              text: '${amt.toStringAsFixed(2)} ريال',
+              flex: 1,
+              align: PrintAlign.right,
+            ),
           ]);
         }
       }
 
       await ticket.rowRaster([
-        PrintRasterColumn(text: 'مجموع المبلغ المدفوع', flex: 2, align: PrintAlign.right),
-        PrintRasterColumn(text: '${totalPaidAmount.toStringAsFixed(2)} ريال', flex: 1, align: PrintAlign.right),
+        PrintRasterColumn(
+          text: 'مجموع المبلغ المدفوع',
+          flex: 2,
+          align: PrintAlign.right,
+        ),
+        PrintRasterColumn(
+          text: '${totalPaidAmount.toStringAsFixed(2)} ريال',
+          flex: 1,
+          align: PrintAlign.right,
+        ),
       ]);
 
       double dueAmount = finalTotal - totalPaidAmount;
       if (dueAmount > 0.01) {
         await ticket.rowRaster([
-          PrintRasterColumn(text: 'Total Due|المجموع المستحق', flex: 2, align: PrintAlign.right),
-          PrintRasterColumn(text: '${dueAmount.toStringAsFixed(2)} ريال', flex: 1, align: PrintAlign.right),
+          PrintRasterColumn(
+            text: 'Total Due|المجموع المستحق',
+            flex: 2,
+            align: PrintAlign.right,
+          ),
+          PrintRasterColumn(
+            text: '${dueAmount.toStringAsFixed(2)} ريال',
+            flex: 1,
+            align: PrintAlign.right,
+          ),
         ]);
       }
 
       if (customer != null && customer['total_due'] != null) {
-        double totalBalance = double.tryParse(customer['total_due'].toString()) ?? 0.0;
+        double totalBalance =
+            double.tryParse(customer['total_due'].toString()) ?? 0.0;
         if (totalBalance > 0.01) {
           await ticket.rowRaster([
-            PrintRasterColumn(text: 'Total Due|المجموع المستحق', flex: 2, align: PrintAlign.right, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-            PrintRasterColumn(text: '${totalBalance.toStringAsFixed(2)} ريال', flex: 1, align: PrintAlign.right, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            PrintRasterColumn(
+              text: 'Total Due|المجموع المستحق',
+              flex: 2,
+              align: PrintAlign.right,
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+            ),
+            PrintRasterColumn(
+              text: '${totalBalance.toStringAsFixed(2)} ريال',
+              flex: 1,
+              align: PrintAlign.right,
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+            ),
           ]);
         }
       }
 
       // 7. QR & Footer
-      String qrContent = generateZatcaQr(businessNameAr, taxNumber.isNotEmpty ? taxNumber : '123456789012345', dateTimeStr, finalTotal, totalTax);
+      String qrContent = generateZatcaQr(
+        businessNameAr,
+        taxNumber.isNotEmpty ? taxNumber : '123456789012345',
+        dateTimeStr,
+        finalTotal,
+        totalTax,
+      );
       ticket.qrcode(qrContent, size: QRSize.size8);
-      await ticket.textRaster('جمعتكم أحلى جمعة ❤️', style: const TextStyle(fontSize: 18), align: PrintAlign.center);
-      
+      await ticket.textRaster(
+        'جمعتكم أحلى جمعة ❤️',
+        style: const TextStyle(fontSize: 18),
+        align: PrintAlign.center,
+      );
+
       ticket.feed(3);
       ticket.cut();
 
-      await printerService.printReceipt(ticket, isKitchen: false, keepAlive: keepAlive);
+      await printerService.printReceipt(
+        ticket,
+        isKitchen: false,
+        keepAlive: keepAlive,
+      );
     } catch (e) {
       print("Printing error: $e");
     }
@@ -542,12 +822,12 @@ class Helper {
   // function for formatting kitchen invoice
   Future<void> printKitchenDocument(sellId, context) async {
     final printerService = PrinterService();
-    
+
     if (!printerService.isPrintingEnabled) return;
-    
+
     // Determine target printer
-    PrinterDevice? target = printerService.useSeparateKitchenPrinter 
-        ? printerService.kitchenDevice 
+    PrinterDevice? target = printerService.useSeparateKitchenPrinter
+        ? printerService.kitchenDevice
         : printerService.customerDevice;
 
     if (target == null) return;
@@ -563,47 +843,83 @@ class Helper {
       final profile = await CapabilityProfile.load();
       final Ticket ticket = Ticket(PaperSize.mm80, profile);
 
-      await ticket.textRaster('طلب المطبخ | Kitchen Order', 
+      await ticket.textRaster(
+        'طلب المطبخ | Kitchen Order',
         style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold),
-        align: PrintAlign.center);
+        align: PrintAlign.center,
+      );
 
       if (sell != null) {
-        await ticket.textRaster('رقم الفاتوره: ${sell['invoice_no']}', 
-          style: const TextStyle(fontSize: 20), align: PrintAlign.left);
-        
-        await ticket.textRaster('يوم: ${sell['transaction_date']}', 
-          style: const TextStyle(fontSize: 18), align: PrintAlign.left);
+        await ticket.textRaster(
+          'رقم الفاتوره: ${sell['invoice_no']}',
+          style: const TextStyle(fontSize: 20),
+          align: PrintAlign.left,
+        );
 
-        String salesMan = '${user['first_name']} ${user['last_name'] ?? ''}'.trim();
-        await ticket.textRaster('Sales Mane: $salesMan', 
-          style: const TextStyle(fontSize: 18), align: PrintAlign.left);
+        await ticket.textRaster(
+          'يوم: ${sell['transaction_date']}',
+          style: const TextStyle(fontSize: 18),
+          align: PrintAlign.left,
+        );
+
+        String salesMan = '${user['first_name']} ${user['last_name'] ?? ''}'
+            .trim();
+        await ticket.textRaster(
+          'Sales Mane: $salesMan',
+          style: const TextStyle(fontSize: 18),
+          align: PrintAlign.left,
+        );
       }
-      
+
       if (sell != null && sell['contact_id'] != null) {
-        var customer = await Contact().getCustomerDetailById(sell['contact_id']);
+        var customer = await Contact().getCustomerDetailById(
+          sell['contact_id'],
+        );
         if (customer != null) {
-          await ticket.textRaster('العميل: ${customer['name']}', 
-            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold), align: PrintAlign.left);
+          await ticket.textRaster(
+            'العميل: ${customer['name']}',
+            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+            align: PrintAlign.left,
+          );
         }
       }
-      
+
       ticket.separator();
 
       await ticket.rowRaster([
-        PrintRasterColumn(text: 'منتج | Product', flex: 4, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20)),
-        PrintRasterColumn(text: 'كمية | Qty', flex: 1, align: PrintAlign.right, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20)),
+        PrintRasterColumn(
+          text: 'منتج | Product',
+          flex: 4,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+        ),
+        PrintRasterColumn(
+          text: 'كمية | Qty',
+          flex: 1,
+          align: PrintAlign.right,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+        ),
       ]);
       ticket.separator();
 
       for (var line in joinedLines) {
-        double qty = double.tryParse(line['quantity']?.toString() ?? '0') ?? 0.0;
+        double qty =
+            double.tryParse(line['quantity']?.toString() ?? '0') ?? 0.0;
 
         await ticket.rowRaster([
-          PrintRasterColumn(text: trimText(line['name'] ?? 'Product', 20), flex: 4, style: const TextStyle(fontSize: 22)),
-          PrintRasterColumn(text: '${qty.toInt()}', flex: 1, align: PrintAlign.right, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+          PrintRasterColumn(
+            text: trimText(line['name'] ?? 'Product', 20),
+            flex: 4,
+            style: const TextStyle(fontSize: 22),
+          ),
+          PrintRasterColumn(
+            text: '${qty.toInt()}',
+            flex: 1,
+            align: PrintAlign.right,
+            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+          ),
         ]);
       }
-      
+
       ticket.separator();
       ticket.feed(3);
       ticket.cut();
@@ -629,10 +945,12 @@ class Helper {
   jobScheduler() {
     if (Config().syncCallLog) {
       final cron = Cron();
-      cron.schedule(Schedule.parse('*/${Config.callLogSyncDuration} * * * *'),
-          () async {
-        syncCallLogs();
-      });
+      cron.schedule(
+        Schedule.parse('*/${Config.callLogSyncDuration} * * * *'),
+        () async {
+          syncCallLogs();
+        },
+      );
     }
   }
 
@@ -652,7 +970,8 @@ class Helper {
         // ignore: unused_local_variable
         int from = DateTime.now()
             .subtract(
-                Duration(minutes: (getLogBefore > 1440) ? 1440 : getLogBefore))
+              Duration(minutes: (getLogBefore > 1440) ? 1440 : getLogBefore),
+            )
             .millisecondsSinceEpoch;
         try {
           // //fetch call_log
@@ -691,11 +1010,13 @@ class Helper {
         'currencyPrecision': Config.currencyPrecision,
         'quantityPrecision': Config.quantityPrecision,
         'taxLabel': '',
-        'taxNumber': ''
+        'taxNumber': '',
       };
     }
     var firstBusiness = business[0];
-    String? symbol = firstBusiness['currency'] != null ? firstBusiness['currency']['symbol'] : '',
+    String? symbol = firstBusiness['currency'] != null
+            ? firstBusiness['currency']['symbol']
+            : '',
         name = firstBusiness['name'],
         logo = firstBusiness['logo'],
         taxLabel = firstBusiness['tax_label_1'],
@@ -709,7 +1030,7 @@ class Helper {
       'currencyPrecision': currencyPrecision ?? Config.currencyPrecision,
       'quantityPrecision': quantityPrecision ?? Config.quantityPrecision,
       'taxLabel': (taxLabel != null) ? '$taxLabel : ' : '',
-      'taxNumber': (taxNumber != null) ? '$taxNumber' : ''
+      'taxNumber': (taxNumber != null) ? '$taxNumber' : '',
     };
   }
 
@@ -722,7 +1043,7 @@ class Helper {
         // Check for sms_settings field (Common in Ultimate POS / ERP)
         if (businessData['sms_settings'] != null) {
           var sms = businessData['sms_settings'];
-          
+
           // Map server fields to WhatsApp parameters
           String url = sms['url'] ?? '';
           String apiKey = sms['header_1'] ?? '';
@@ -732,7 +1053,9 @@ class Helper {
             await WhatsAppService().saveConfig(
               baseUrl: url.isNotEmpty ? url : ApiEndPoints.whatsappBaseUrl,
               apiKey: apiKey.isNotEmpty ? apiKey : ApiEndPoints.whatsappApiKey,
-              sessionId: sessionId.isNotEmpty ? sessionId : ApiEndPoints.whatsappSessionId,
+              sessionId: sessionId.isNotEmpty
+                  ? sessionId
+                  : ApiEndPoints.whatsappSessionId,
             );
             print("WhatsApp Config synced from server Business Settings");
           }
@@ -756,8 +1079,11 @@ class Helper {
   }
 
   // Generate reference number based on business settings
-  Future<String> generateRefNumber(String type,
-      {String? defaultPrefix, int? locationId}) async {
+  Future<String> generateRefNumber(
+    String type, {
+    String? defaultPrefix,
+    int? locationId,
+  }) async {
     List business = await System().get('business');
     String prefix = '';
 
@@ -775,20 +1101,28 @@ class Helper {
 
     int nextNumber = 1;
     String refYear = DateTime.now().year.toString();
+    bool includeLocationId =
+        locationId != null && (type == 'sell' || type == 'draft');
+
+    String formatReferenceNumber(int number) {
+      String refDigits = number.toString().padLeft(6, '0');
+      String locationSuffix = includeLocationId ? locationId.toString() : '';
+      return '$refYear$locationSuffix-$refDigits';
+    }
 
     // Online-first check
     if (type == 'sell' && locationId != null) {
       try {
         if (await checkConnectivity()) {
-          String? lastOnlineInv =
-              await SellApi().getLatestOnlineInvoiceNumber(locationId);
+          String? lastOnlineInv = await SellApi().getLatestOnlineInvoiceNumber(
+            locationId,
+          );
           if (lastOnlineInv != null && lastOnlineInv.contains('-')) {
             var parts = lastOnlineInv.split('-');
             int? lastNum = int.tryParse(parts.last);
             if (lastNum != null) {
               nextNumber = lastNum + 1;
-              String refDigits = nextNumber.toString().padLeft(6, '0');
-              return '$refYear-$refDigits';
+              return formatReferenceNumber(nextNumber);
             }
           }
         }
@@ -799,8 +1133,13 @@ class Helper {
 
     final db = await DbProvider().database;
     // Fallback or other types: get the last invoice and increment its number part
-    List<Map<String, dynamic>> lastRes =
-        await db.query('sell', orderBy: 'id DESC', limit: 1);
+    List<Map<String, dynamic>> lastRes = await db.query(
+      'sell',
+      where: includeLocationId ? 'location_id = ?' : null,
+      whereArgs: includeLocationId ? [locationId] : null,
+      orderBy: 'id DESC',
+      limit: 1,
+    );
 
     if (lastRes.isNotEmpty) {
       String? lastInv = lastRes.first['invoice_no'];
@@ -809,11 +1148,21 @@ class Helper {
         int? lastNum = int.tryParse(parts.last);
         if (lastNum != null) nextNumber = lastNum + 1;
       } else {
-        var result = await db.rawQuery('SELECT COUNT(*) AS count FROM sell');
+        var result = includeLocationId
+            ? await db.rawQuery(
+                'SELECT COUNT(*) AS count FROM sell WHERE location_id = ?',
+                [locationId],
+              )
+            : await db.rawQuery('SELECT COUNT(*) AS count FROM sell');
         nextNumber = (result[0]['count'] as int) + 1;
       }
     } else {
-      var result = await db.rawQuery('SELECT COUNT(*) AS count FROM sell');
+      var result = includeLocationId
+          ? await db.rawQuery(
+              'SELECT COUNT(*) AS count FROM sell WHERE location_id = ?',
+              [locationId],
+            )
+          : await db.rawQuery('SELECT COUNT(*) AS count FROM sell');
       nextNumber = (result[0]['count'] as int) + 1;
     }
 
@@ -822,8 +1171,10 @@ class Helper {
     if (['contacts', 'business_location', 'username'].contains(type)) {
       return '$prefix$refDigits';
     } else {
-      // Format as Year-SequentialNumber (e.g., 2026-000048)
-      return '$refYear-$refDigits';
+      // Include the branch ID after the year when one is available.
+      return includeLocationId
+          ? formatReferenceNumber(nextNumber)
+          : '$refYear-$refDigits';
     }
   }
 
@@ -838,16 +1189,21 @@ class Helper {
     }
   }
 
-  Widget callDropdown(context, followUpDetails, List numbers,
-      {required String type}) {
+  Widget callDropdown(
+    context,
+    followUpDetails,
+    List numbers, {
+    required String type,
+  }) {
     numbers.removeWhere((element) => element.toString() == 'null');
     return Container(
       height: MySize.size36,
       child: PopupMenuButton<String>(
         icon: Icon(
           (type == 'call') ? Symbols.phone : Symbols.whatshot,
-          color:
-              (type == 'call') ? themeData.colorScheme.primary : Colors.green,
+          color: (type == 'call')
+              ? themeData.colorScheme.primary
+              : Colors.green,
         ),
         onSelected: (value) async {
           if (type == 'call') {
@@ -862,10 +1218,7 @@ class Helper {
           return numbers.map((item) {
             return PopupMenuItem<String>(
               value: item,
-              child: Text(
-                '$item',
-                style: TextStyle(color: Colors.black),
-              ),
+              child: Text('$item', style: TextStyle(color: Colors.black)),
             );
           }).toList();
         },
@@ -895,14 +1248,18 @@ class Helper {
               color: themeData.colorScheme.onSurface,
             ),
           ),
-        )
+        ),
       ],
     );
   }
 
-  Future<void> showPrintOptionsDialog(BuildContext context, dynamic sellId, dynamic taxId) async {
+  Future<void> showPrintOptionsDialog(
+    BuildContext context,
+    dynamic sellId,
+    dynamic taxId,
+  ) async {
     final printerService = PrinterService();
-    
+
     // Send notification logic in background (don't block UI)
     sendWhatsAppNotification(sellId);
 
@@ -943,7 +1300,12 @@ class Helper {
                     child: OutlinedButton(
                       onPressed: () async {
                         Navigator.pop(context);
-                        await printDocument(sellId, taxId, context, isManual: true);
+                        await printDocument(
+                          sellId,
+                          taxId,
+                          context,
+                          isManual: true,
+                        );
                       },
                       child: const Text('Customer Only'),
                     ),
@@ -975,17 +1337,29 @@ class Helper {
     );
   }
 
-  Future<void> sendWhatsAppNotification(dynamic sellId, {bool isServerId = false, bool force = false}) async {
+  Future<void> sendWhatsAppNotification(
+    dynamic sellId, {
+    bool isServerId = false,
+    bool force = false,
+  }) async {
     try {
       final whatsappService = WhatsAppService();
-      await whatsappService.sendSaleNotification(sellId, isServerId: isServerId, force: force);
+      await whatsappService.sendSaleNotification(
+        sellId,
+        isServerId: isServerId,
+        force: force,
+      );
     } catch (e) {
       print("Sales notification error: $e");
     }
   }
 
   // Quick printer selection dialog
-  Future<void> _showPrinterSelectionDialog(BuildContext context, dynamic sellId, dynamic taxId) async {
+  Future<void> _showPrinterSelectionDialog(
+    BuildContext context,
+    dynamic sellId,
+    dynamic taxId,
+  ) async {
     final printerService = PrinterService();
     PrinterConnectionType selectedType = PrinterConnectionType.network;
     List<PrinterDevice> devices = [];
@@ -998,7 +1372,9 @@ class Helper {
         return StatefulBuilder(
           builder: (context, setState) {
             return AlertDialog(
-              title: Text(AppLocalizations.of(context).translate('printer_configuration')),
+              title: Text(
+                AppLocalizations.of(context).translate('printer_configuration'),
+              ),
               content: Container(
                 width: double.maxFinite,
                 child: Column(
@@ -1017,23 +1393,39 @@ class Helper {
                               );
                             }).toList(),
                             onChanged: (val) {
-                              if (val != null) setState(() => selectedType = val);
+                              if (val != null)
+                                setState(() => selectedType = val);
                             },
                           ),
                         ),
                         IconButton(
-                          icon: isScanning 
-                            ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) 
-                            : Icon(Icons.search),
-                          onPressed: isScanning ? null : () async {
-                            setState(() { isScanning = true; devices = []; });
-                            try {
-                              final results = await printerService.manager.scanPrinters(types: {selectedType});
-                              setState(() { devices = results; isScanning = false; });
-                            } catch (e) {
-                              setState(() => isScanning = false);
-                            }
-                          },
+                          icon: isScanning
+                              ? SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : Icon(Icons.search),
+                          onPressed: isScanning
+                              ? null
+                              : () async {
+                                  setState(() {
+                                    isScanning = true;
+                                    devices = [];
+                                  });
+                                  try {
+                                    final results = await printerService.manager
+                                        .scanPrinters(types: {selectedType});
+                                    setState(() {
+                                      devices = results;
+                                      isScanning = false;
+                                    });
+                                  } catch (e) {
+                                    setState(() => isScanning = false);
+                                  }
+                                },
                         ),
                       ],
                     ),
@@ -1057,10 +1449,18 @@ class Helper {
                             onPressed: () async {
                               final ip = manualIpController.text.trim();
                               if (ip.isNotEmpty) {
-                                final device = NetworkPrinterDevice(name: 'Network Printer', host: ip);
+                                final device = NetworkPrinterDevice(
+                                  name: 'Network Printer',
+                                  host: ip,
+                                );
                                 await printerService.setSelectedDevice(device);
                                 Navigator.pop(context);
-                                printDocument(sellId, taxId, context, isManual: true);
+                                printDocument(
+                                  sellId,
+                                  taxId,
+                                  context,
+                                  isManual: true,
+                                );
                               }
                             },
                             child: const Text('Add'),
@@ -1071,26 +1471,45 @@ class Helper {
                     Divider(),
                     ConstrainedBox(
                       constraints: BoxConstraints(maxHeight: 200),
-                      child: devices.isEmpty 
-                        ? Center(child: Text(isScanning ? 'Scanning...' : 'No printers found'))
-                        : ListView.builder(
-                            shrinkWrap: true,
-                            itemCount: devices.length,
-                            itemBuilder: (context, index) {
-                              final device = devices[index];
-                              return ListTile(
-                                leading: Icon(Icons.print),
-                                title: Text(device.name),
-                                subtitle: Text(device is NetworkPrinterDevice ? device.host : (device is BluetoothPrinterDevice ? device.address : '')),
-                                onTap: () async {
-                                  await printerService.setSelectedDevice(device);
-                                  Navigator.pop(context);
-                                  // Retry printing
-                                  printDocument(sellId, taxId, context, isManual: true);
-                                },
-                              );
-                            },
-                          ),
+                      child: devices.isEmpty
+                          ? Center(
+                              child: Text(
+                                isScanning
+                                    ? 'Scanning...'
+                                    : 'No printers found',
+                              ),
+                            )
+                          : ListView.builder(
+                              shrinkWrap: true,
+                              itemCount: devices.length,
+                              itemBuilder: (context, index) {
+                                final device = devices[index];
+                                return ListTile(
+                                  leading: Icon(Icons.print),
+                                  title: Text(device.name),
+                                  subtitle: Text(
+                                    device is NetworkPrinterDevice
+                                        ? device.host
+                                        : (device is BluetoothPrinterDevice
+                                              ? device.address
+                                              : ''),
+                                  ),
+                                  onTap: () async {
+                                    await printerService.setSelectedDevice(
+                                      device,
+                                    );
+                                    Navigator.pop(context);
+                                    // Retry printing
+                                    printDocument(
+                                      sellId,
+                                      taxId,
+                                      context,
+                                      isManual: true,
+                                    );
+                                  },
+                                );
+                              },
+                            ),
                     ),
                   ],
                 ),
@@ -1140,10 +1559,7 @@ class _NotificationWidgetState extends State<_NotificationWidget>
     _offsetAnimation = Tween<Offset>(
       begin: const Offset(1.5, 0.0),
       end: Offset.zero,
-    ).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeOut,
-    ));
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOut));
 
     _controller.forward();
   }
@@ -1166,7 +1582,9 @@ class _NotificationWidgetState extends State<_NotificationWidget>
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             decoration: BoxDecoration(
-              color: widget.isError ? Colors.red.shade800 : Colors.blue.shade700,
+              color: widget.isError
+                  ? Colors.red.shade800
+                  : Colors.blue.shade700,
               borderRadius: BorderRadius.circular(12),
               boxShadow: const [
                 BoxShadow(
@@ -1196,7 +1614,11 @@ class _NotificationWidgetState extends State<_NotificationWidget>
                 const SizedBox(width: 8),
                 InkWell(
                   onTap: widget.onDismiss,
-                  child: const Icon(Icons.close, color: Colors.white70, size: 16),
+                  child: const Icon(
+                    Icons.close,
+                    color: Colors.white70,
+                    size: 16,
+                  ),
                 ),
               ],
             ),
@@ -1206,4 +1628,3 @@ class _NotificationWidgetState extends State<_NotificationWidget>
     );
   }
 }
-

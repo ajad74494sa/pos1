@@ -35,7 +35,7 @@ class Products extends StatefulWidget {
 }
 
 class _ProductsState extends State<Products> {
-  List products = []; 
+  List products = [];
   static List cachedProducts = [];
   static int cachedLocationId = -1;
   List<Map<String, dynamic>> cartItems = [];
@@ -74,7 +74,7 @@ class _ProductsState extends State<Products> {
   final ScrollController _scrollController = ScrollController();
   Timer? _debounce;
   List customers = [];
-  int selectedCustomerId = 1;
+  int selectedCustomerId = 0;
   Map? argument;
   List<Map<dynamic, dynamic>> locationListMap = [
     {'id': 0, 'name': 'All'},
@@ -97,7 +97,7 @@ class _ProductsState extends State<Products> {
         cachedProducts = List.from(products);
         cachedLocationId = selectedLocationId;
       } catch (_) {}
-    }); 
+    });
 
     _scrollController.addListener(() {
       if (_scrollController.position.pixels >=
@@ -106,7 +106,6 @@ class _ProductsState extends State<Products> {
       }
     });
 
-    setLocationMap();
     categoryList();
     subCategoryList(categoryId);
     brandList();
@@ -121,13 +120,61 @@ class _ProductsState extends State<Products> {
 
   Future<void> _loadCustomers() async {
     try {
+      if (await Helper().checkConnectivity()) {
+        await CustomerApi().get();
+      }
       var list = await Contact().get();
       if (!mounted) return;
       setState(() {
         customers = list;
       });
+      if (activeSellId == null) {
+        await _selectDefaultCustomerForLocation(selectedLocationId);
+      }
       await _updateCustomerDue();
     } catch (_) {}
+  }
+
+  Future<void> _selectDefaultCustomerForLocation(int locationId) async {
+    final location = locationListMap.cast<Map>().firstWhere(
+      (item) => int.tryParse(item['id'].toString()) == locationId,
+      orElse: () => <String, dynamic>{},
+    );
+    final defaultCustomerId = int.tryParse(
+      location['default_customer_id']?.toString() ?? '',
+    );
+    final defaultCustomer = defaultCustomerId == null
+        ? null
+        : customers.cast<Map>().where((customer) {
+            return int.tryParse(customer['id'].toString()) == defaultCustomerId;
+          }).firstOrNull;
+    final walkInCustomer = customers.cast<Map>().where((customer) {
+      final name = (customer['name'] ?? '').toString().toLowerCase().replaceAll(
+        RegExp(r'[^a-z0-9]'),
+        '',
+      );
+      final contactCode = (customer['contact_id'] ?? '')
+          .toString()
+          .trim()
+          .toUpperCase();
+      return name == 'walkincustomer' || contactCode == 'CO0001';
+    }).firstOrNull;
+    final customer = defaultCustomer ?? walkInCustomer;
+
+    if (selectedLocationId == locationId &&
+        activeSellId == null &&
+        selectedCustomerId == 0) {
+      if (mounted) {
+        setState(() {
+          selectedCustomerId =
+              int.tryParse(customer?['id']?.toString() ?? '') ?? 0;
+        });
+      } else {
+        selectedCustomerId =
+            int.tryParse(customer?['id']?.toString() ?? '') ?? 0;
+      }
+      await _updateCustomerDue();
+    }
   }
 
   Future<void> _updateCustomerDue() async {
@@ -135,10 +182,16 @@ class _ProductsState extends State<Products> {
       double due = 0.0;
       if (await Helper().checkConnectivity()) {
         try {
-          var response = await CustomerApi().getContactDetails(selectedCustomerId);
-          if (response != null && response['data'] != null && response['data'].isNotEmpty) {
+          var response = await CustomerApi().getContactDetails(
+            selectedCustomerId,
+          );
+          if (response != null &&
+              response['data'] != null &&
+              response['data'].isNotEmpty) {
             var contactData = response['data'][0];
-            due = double.tryParse((contactData['sell_due'] ?? 0).toString()) ?? 0.0;
+            due =
+                double.tryParse((contactData['sell_due'] ?? 0).toString()) ??
+                0.0;
           } else {
             due = await SellDatabase().getCustomerDue(selectedCustomerId);
           }
@@ -166,7 +219,8 @@ class _ProductsState extends State<Products> {
     argument = ModalRoute.of(context)!.settings.arguments as Map?;
     if (argument != null && argument!['locationId'] != null) {
       selectedLocationId =
-          int.tryParse(argument!['locationId'].toString()) ?? selectedLocationId;
+          int.tryParse(argument!['locationId'].toString()) ??
+          selectedLocationId;
       canChangeLocation = false;
 
       if (argument!['sellId'] != null) {
@@ -180,7 +234,11 @@ class _ProductsState extends State<Products> {
     } else {
       canChangeLocation = true;
     }
+    await setLocationMap();
     await setInitDetails(selectedLocationId);
+    if (activeSellId == null) {
+      await _selectDefaultCustomerForLocation(selectedLocationId);
+    }
     await cartList();
     if (mounted) {
       super.didChangeDependencies();
@@ -211,9 +269,14 @@ class _ProductsState extends State<Products> {
                 'product_id': l['product_id'],
                 'display_name': l['name'] ?? '',
                 'image': l['product_image_url'],
-                'unit_price': double.tryParse((l['unit_price'] ?? '0').toString()) ?? 0.0,
-                'quantity': (l['quantity'] != null) ? (l['quantity'] as num).toInt() : 1,
-                'discount_amount': double.tryParse((l['discount_amount'] ?? '0').toString()) ?? 0.0,
+                'unit_price':
+                    double.tryParse((l['unit_price'] ?? '0').toString()) ?? 0.0,
+                'quantity': (l['quantity'] != null)
+                    ? (l['quantity'] as num).toInt()
+                    : 1,
+                'discount_amount':
+                    double.tryParse((l['discount_amount'] ?? '0').toString()) ??
+                    0.0,
                 'discount_type': l['discount_type'] ?? 'fixed',
               };
             })
@@ -242,21 +305,30 @@ class _ProductsState extends State<Products> {
       });
     } else {
       if (mounted) {
-        Helper().showNotification(context, AppLocalizations.of(context).translate('no_subscription_found'), isError: true);
+        Helper().showNotification(
+          context,
+          AppLocalizations.of(context).translate('no_subscription_found'),
+          isError: true,
+        );
       }
     }
     await Helper().getFormattedBusinessDetails().then((value) {
       symbol = value['symbol'] + ' ';
     });
-    await setDefaultLocation(selectedLocationId);
+    unawaited(Helper().preloadBusinessLogo());
+    setDefaultLocation(selectedLocationId);
     try {
       var stored = await System().get('products_cache', selectedLocationId);
       if (stored != null && stored is List && stored.isNotEmpty) {
         products = List.from(stored);
         try {
           products.sort((a, b) {
-            final an = (a['display_name'] ?? a['name'] ?? '').toString().toLowerCase();
-            final bn = (b['display_name'] ?? b['name'] ?? '').toString().toLowerCase();
+            final an = (a['display_name'] ?? a['name'] ?? '')
+                .toString()
+                .toLowerCase();
+            final bn = (b['display_name'] ?? b['name'] ?? '')
+                .toString()
+                .toLowerCase();
             if (byAlphabets == 1) return bn.compareTo(an);
             return an.compareTo(bn);
           });
@@ -269,7 +341,8 @@ class _ProductsState extends State<Products> {
       }
     } catch (_) {}
 
-    bool canUseCache = (cachedProducts.isNotEmpty &&
+    bool canUseCache =
+        (cachedProducts.isNotEmpty &&
         cachedLocationId == selectedLocationId &&
         searchController.text.trim().isEmpty &&
         categoryId == 0 &&
@@ -283,8 +356,12 @@ class _ProductsState extends State<Products> {
       products = List.from(cachedProducts);
       try {
         products.sort((a, b) {
-          final an = (a['display_name'] ?? a['name'] ?? '').toString().toLowerCase();
-          final bn = (b['display_name'] ?? b['name'] ?? '').toString().toLowerCase();
+          final an = (a['display_name'] ?? a['name'] ?? '')
+              .toString()
+              .toLowerCase();
+          final bn = (b['display_name'] ?? b['name'] ?? '')
+              .toString()
+              .toLowerCase();
           if (byAlphabets == 1) return bn.compareTo(an);
           return an.compareTo(bn);
         });
@@ -331,7 +408,8 @@ class _ProductsState extends State<Products> {
     final date2 = DateTime.now();
 
     // Only auto-sync if we aren't performing a search/filter to keep it fast
-    bool isSearching = searchController.text.trim().isNotEmpty ||
+    bool isSearching =
+        searchController.text.trim().isNotEmpty ||
         categoryId != 0 ||
         brandId != 0;
 
@@ -357,38 +435,43 @@ class _ProductsState extends State<Products> {
           byPrice: byPrice,
         )
         .then((element) {
-      if (element != null && element is List && element.isNotEmpty) {
-        offset++;
-        List newProducts = [];
-        for (var product in element) {
-          double? price;
-          if (product['selling_price_group'] != null) {
-            try {
-              final groups = jsonDecode(product['selling_price_group']);
-              if (groups is List) {
-                for (var g in groups) {
-                  if (g['key'] == sellingPriceGroupId) {
-                    price = double.tryParse(g['value'].toString());
+          if (element != null && element is List && element.isNotEmpty) {
+            offset++;
+            List newProducts = [];
+            for (var product in element) {
+              double? price;
+              if (product['selling_price_group'] != null) {
+                try {
+                  final groups = jsonDecode(product['selling_price_group']);
+                  if (groups is List) {
+                    for (var g in groups) {
+                      if (g['key'] == sellingPriceGroupId) {
+                        price = double.tryParse(g['value'].toString());
+                      }
+                    }
                   }
-                }
+                } catch (_) {}
               }
-            } catch (_) {}
+              final p = ProductModel().product(product, price);
+              if (p != null) {
+                newProducts.add(p);
+              }
+            }
+            setState(() {
+              products.addAll(newProducts);
+            });
           }
-          final p = ProductModel().product(product, price);
-          if (p != null) {
-            newProducts.add(p);
-          }
-        }
-        setState(() {
-          products.addAll(newProducts);
-        });
-      }
-    }).whenComplete(() async {
+        })
+        .whenComplete(() async {
           try {
             products.sort((a, b) {
               if (a == null || b == null) return 0;
-              final an = (a['display_name'] ?? a['name'] ?? '').toString().toLowerCase();
-              final bn = (b['display_name'] ?? b['name'] ?? '').toString().toLowerCase();
+              final an = (a['display_name'] ?? a['name'] ?? '')
+                  .toString()
+                  .toLowerCase();
+              final bn = (b['display_name'] ?? b['name'] ?? '')
+                  .toString()
+                  .toLowerCase();
               if (byAlphabets == 1) return bn.compareTo(an);
               return an.compareTo(bn);
             });
@@ -537,7 +620,8 @@ class _ProductsState extends State<Products> {
     double total = 0;
     for (var item in cartItems) {
       double price = (item['unit_price'] ?? 0);
-      double quantity = double.tryParse((item['quantity'] ?? 1).toString()) ?? 1.0;
+      double quantity =
+          double.tryParse((item['quantity'] ?? 1).toString()) ?? 1.0;
       double discount = 0;
       if (item['discount_type'] == 'percentage') {
         discount = (price * (item['discount_amount'] ?? 0)) / 100;
@@ -577,121 +661,139 @@ class _ProductsState extends State<Products> {
         child: Stack(
           children: [
             Scaffold(
-            key: _scaffoldKey,
-            resizeToAvoidBottomInset: false,
-            backgroundColor: Colors.white,
-            drawer: WindowsMenu(
-              accessExpenses: canAddSell, // Approximation or fetch real perm
-              isAdmin: true, 
-              userName: "",
-            ),
-            endDrawer: _filterDrawer(),
-            appBar: AppBar(
-              backgroundColor: const Color(0xff732a13), // Match Home page brown
-              elevation: 0,
-              centerTitle: false,
-              iconTheme: const IconThemeData(color: Colors.white),
-              title: Text(
-                AppLocalizations.of(context).translate('products'),
-                style: AppTheme.getTextStyle(
-                  themeData.textTheme.titleLarge,
-                  fontWeight: 600,
-                  color: Colors.white,
-                ),
+              key: _scaffoldKey,
+              resizeToAvoidBottomInset: false,
+              backgroundColor: Colors.white,
+              drawer: WindowsMenu(
+                accessExpenses: canAddSell, // Approximation or fetch real perm
+                isAdmin: true,
+                userName: "",
               ),
-              leading: IconButton(
-                onPressed: () => _scaffoldKey.currentState?.openDrawer(),
-                icon: const Icon(Icons.menu, color: Colors.white),
-              ),
-              actions: <Widget>[
-                IconButton(
-                  onPressed: () async {
-                    if (await Helper().checkConnectivity()) {
-                      Helper().showNotification(context, "Syncing products...");
-                      await Variations().refresh();
-                      setState(() {
-                        products = [];
-                        offset = 0;
-                      });
-                      productList();
-                    } else {
-                      _showSafeToast(
-                        AppLocalizations.of(
-                          context,
-                        ).translate('check_connectivity'),
-                      );
-                    }
-                  },
-                  icon: const Icon(Symbols.sync, color: Colors.white),
-                ),
-                Theme(
-                  data: themeData.copyWith(
-                    canvasColor: const Color(0xff732a13),
+              endDrawer: _filterDrawer(),
+              appBar: AppBar(
+                backgroundColor: const Color(
+                  0xff732a13,
+                ), // Match Home page brown
+                elevation: 0,
+                centerTitle: false,
+                iconTheme: const IconThemeData(color: Colors.white),
+                title: Text(
+                  AppLocalizations.of(context).translate('products'),
+                  style: AppTheme.getTextStyle(
+                    themeData.textTheme.titleLarge,
+                    fontWeight: 600,
+                    color: Colors.white,
                   ),
-                  child: locations(),
                 ),
-              ],
-            ),
-            body: (canViewProducts)
-                ? LayoutBuilder(
-                    builder: (context, constraints) {
-                      bool isMobile = constraints.maxWidth < 900;
-                      
-                      if (isMobile) {
-                        return Column(
+                leading: IconButton(
+                  onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+                  icon: const Icon(Icons.menu, color: Colors.white),
+                ),
+                actions: <Widget>[
+                  IconButton(
+                    onPressed: () async {
+                      if (await Helper().checkConnectivity()) {
+                        Helper().showNotification(
+                          context,
+                          "Syncing products...",
+                        );
+                        await Variations().refresh();
+                        setState(() {
+                          products = [];
+                          offset = 0;
+                        });
+                        _selectDefaultCustomerForLocation(selectedLocationId);
+                        productList();
+                      } else {
+                        _showSafeToast(
+                          AppLocalizations.of(context)
+                              .translate('check_connectivity'),
+                        );
+                      }
+                    },
+                    icon: const Icon(Symbols.sync, color: Colors.white),
+                  ),
+                  Theme(
+                    data: themeData.copyWith(
+                      canvasColor: const Color(0xff732a13),
+                    ),
+                    child: locations(),
+                  ),
+                ],
+              ),
+              body: (canViewProducts)
+                  ? LayoutBuilder(
+                      builder: (context, constraints) {
+                        bool isMobile = constraints.maxWidth < 900;
+
+                        if (isMobile) {
+                          return Column(
+                            children: [
+                              _buildMobileProductHeader(),
+                              Expanded(
+                                child: Container(
+                                  padding: EdgeInsets.all(MySize.size8!),
+                                  color: const Color(0xfff5f5f5),
+                                  child: (selectedLocationId == 0)
+                                      ? _buildLocationPrompt()
+                                      : _productsList(
+                                          crossAxisCount:
+                                              constraints.maxWidth > 500
+                                              ? 3
+                                              : 2,
+                                        ),
+                                ),
+                              ),
+                              _buildMobileCartSummary(),
+                            ],
+                          );
+                        }
+
+                        return Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            _buildMobileProductHeader(),
+                            Container(
+                              width:
+                                  constraints.maxWidth *
+                                  (constraints.maxWidth > 1200 ? 0.3 : 0.4),
+                              color: Colors.white,
+                              padding: EdgeInsets.all(MySize.size16!),
+                              child: _buildCartPanel(),
+                            ),
+                            const VerticalDivider(width: 1),
                             Expanded(
                               child: Container(
                                 padding: EdgeInsets.all(MySize.size8!),
                                 color: const Color(0xfff5f5f5),
                                 child: (selectedLocationId == 0)
                                     ? _buildLocationPrompt()
-                                    : _productsList(crossAxisCount: constraints.maxWidth > 500 ? 3 : 2),
+                                    : _productsList(
+                                        crossAxisCount:
+                                            constraints.maxWidth > 1200 ? 5 : 4,
+                                      ),
                               ),
                             ),
-                            _buildMobileCartSummary(),
                           ],
                         );
-                      }
-
-                      return Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Container(
-                            width: constraints.maxWidth * (constraints.maxWidth > 1200 ? 0.3 : 0.4),
-                            color: Colors.white,
-                            padding: EdgeInsets.all(MySize.size16!),
-                            child: _buildCartPanel(),
-                          ),
-                          const VerticalDivider(width: 1),
-                          Expanded(
-                            child: Container(
-                              padding: EdgeInsets.all(MySize.size8!),
-                              color: const Color(0xfff5f5f5),
-                              child: (selectedLocationId == 0)
-                                  ? _buildLocationPrompt()
-                                  : _productsList(crossAxisCount: constraints.maxWidth > 1200 ? 5 : 4),
-                            ),
-                          ),
-                        ],
-                      );
-                    }
-                  )
-                : Center(
-                    child: Text(
-                      AppLocalizations.of(context).translate('unauthorised'),
-                      style: const TextStyle(color: Colors.black),
+                      },
+                    )
+                  : Center(
+                      child: Text(
+                        AppLocalizations.of(context).translate('unauthorised'),
+                        style: const TextStyle(color: Colors.black),
+                      ),
                     ),
-                  ),
-          ),
-          if (isProcessingSale)
-            Positioned.fill(
-              child: Helper().loadingIndicator(context, subTitle: 'PROCESSING SALE...'),
             ),
-        ],
+            if (isProcessingSale)
+              Positioned.fill(
+                child: Helper().loadingIndicator(
+                  context,
+                  subTitle: 'PROCESSING SALE...',
+                ),
+              ),
+          ],
+        ),
       ),
-    ),
     );
   }
 
@@ -699,10 +801,7 @@ class _ProductsState extends State<Products> {
     return const Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.location_on),
-          Text('Please set a location'),
-        ],
+        children: [Icon(Icons.location_on), Text('Please set a location')],
       ),
     );
   }
@@ -717,7 +816,7 @@ class _ProductsState extends State<Products> {
           IconButton(
             onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
             icon: const Icon(Icons.filter_alt_outlined),
-          )
+          ),
         ],
       ),
     );
@@ -731,14 +830,14 @@ class _ProductsState extends State<Products> {
           'id': 0,
           'name': 'Walk-in Customer',
           'mobile': '',
-          'contact_id': ''
+          'contact_id': '',
         });
         for (var c in customers) {
           options.add({
-            'id': c['id'], 
+            'id': c['id'],
             'name': c['name'],
             'mobile': c['mobile'] ?? '',
-            'contact_id': c['contact_id'] ?? ''
+            'contact_id': c['contact_id'] ?? '',
           });
         }
 
@@ -754,10 +853,16 @@ class _ProductsState extends State<Products> {
                   query = q.toLowerCase();
                   filtered = options
                       .where(
-                        (opt) => 
-                            opt['name'].toString().toLowerCase().contains(query) ||
-                            opt['mobile'].toString().toLowerCase().contains(query) ||
-                            opt['contact_id'].toString().toLowerCase().contains(query),
+                        (opt) =>
+                            opt['name'].toString().toLowerCase().contains(
+                              query,
+                            ) ||
+                            opt['mobile'].toString().toLowerCase().contains(
+                              query,
+                            ) ||
+                            opt['contact_id'].toString().toLowerCase().contains(
+                              query,
+                            ),
                       )
                       .toList();
                   setStateDialog(() {});
@@ -768,12 +873,9 @@ class _ProductsState extends State<Products> {
                     autofocus: true,
                     decoration: InputDecoration(
                       hintText: "Search Name/Mobile/ID",
-                      prefixIcon: const Icon(
-                        Icons.search,
-                      ),
+                      prefixIcon: const Icon(Icons.search),
                       border: OutlineInputBorder(
-                        borderRadius:
-                            BorderRadius.circular(8),
+                        borderRadius: BorderRadius.circular(8),
                       ),
                     ),
                     onChanged: doFilter,
@@ -782,8 +884,7 @@ class _ProductsState extends State<Products> {
                     width: double.maxFinite,
                     height: 320,
                     child: Column(
-                      crossAxisAlignment:
-                          CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Expanded(
                           child: ListView.builder(
@@ -797,19 +898,12 @@ class _ProductsState extends State<Products> {
                                     opt['name']
                                         .toString()
                                         .split(' ')
-                                        .map(
-                                          (e) =>
-                                              e.isNotEmpty
-                                              ? e[0]
-                                              : '',
-                                        )
+                                        .map((e) => e.isNotEmpty ? e[0] : '')
                                         .take(2)
                                         .join(),
                                   ),
                                 ),
-                                title: Text(
-                                  opt['name'].toString(),
-                                ),
+                                title: Text(opt['name'].toString()),
                                 subtitle: Text(
                                   "${opt['mobile']} ${opt['contact_id'] != '' ? ' | ID: ${opt['contact_id']}' : ''}",
                                   style: const TextStyle(fontSize: 12),
@@ -844,9 +938,7 @@ class _ProductsState extends State<Products> {
                         Navigator.pop(ctx);
                       },
                       child: Text(
-                        AppLocalizations.of(
-                          context,
-                        ).translate('close'),
+                        AppLocalizations.of(context).translate('close'),
                       ),
                     ),
                   ],
@@ -869,13 +961,9 @@ class _ProductsState extends State<Products> {
           borderRadius: BorderRadius.circular(8),
           color: Colors.white,
         ),
-        padding: const EdgeInsets.symmetric(
-          horizontal: 12,
-          vertical: 12,
-        ),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
         child: Row(
-          mainAxisAlignment:
-              MainAxisAlignment.spaceBetween,
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Expanded(
               child: Column(
@@ -883,13 +971,10 @@ class _ProductsState extends State<Products> {
                 children: [
                   Text(
                     (selectedCustomerId == 0)
-                        ? AppLocalizations.of(
-                            context,
-                          ).translate('walk_in_customer')
+                        ? AppLocalizations.of(context)
+                              .translate('walk_in_customer')
                         : (customers.firstWhere(
-                                (c) =>
-                                    c['id'] ==
-                                    selectedCustomerId,
+                                (c) => c['id'] == selectedCustomerId,
                                 orElse: () => {'name': ''},
                               )['name'] ??
                               ''),
@@ -923,8 +1008,11 @@ class _ProductsState extends State<Products> {
             ),
             IconButton(
               onPressed: _showAddCustomerDialog,
-              icon: const Icon(Icons.person_add_alt_1,
-                  color: Color(0xff732a13), size: 20),
+              icon: const Icon(
+                Icons.person_add_alt_1,
+                color: Color(0xff732a13),
+                size: 20,
+              ),
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(),
             ),
@@ -961,9 +1049,8 @@ class _ProductsState extends State<Products> {
             child: cartItems.isEmpty
                 ? Center(
                     child: Text(
-                      AppLocalizations.of(
-                        context,
-                      ).translate('no_items_added_to_cart'),
+                      AppLocalizations.of(context)
+                          .translate('no_items_added_to_cart'),
                     ),
                   )
                 : _buildCartList(),
@@ -976,10 +1063,7 @@ class _ProductsState extends State<Products> {
 
   Widget _buildCartHeader() {
     return Container(
-      padding: const EdgeInsets.symmetric(
-        vertical: 8,
-        horizontal: 4,
-      ),
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
       decoration: BoxDecoration(
         color: const Color(0xfffafafa),
         borderRadius: BorderRadius.circular(8),
@@ -1001,7 +1085,10 @@ class _ProductsState extends State<Products> {
                   child: Center(
                     child: Text(
                       'Qty',
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
                     ),
                   ),
                 ),
@@ -1009,17 +1096,16 @@ class _ProductsState extends State<Products> {
                   child: Center(
                     child: Text(
                       'Subtotal',
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
                     ),
                   ),
                 ),
                 SizedBox(
                   width: 30,
-                  child: Icon(
-                    Icons.close,
-                    color: Colors.black,
-                    size: 20,
-                  ),
+                  child: Icon(Icons.close, color: Colors.black, size: 20),
                 ),
               ],
             ),
@@ -1087,10 +1173,22 @@ class _ProductsState extends State<Products> {
                           fit: BoxFit.scaleDown,
                           child: Builder(
                             builder: (context) {
-                              double price = double.tryParse((it['unit_price'] ?? 0).toString()) ?? 0.0;
-                              double quantity = double.tryParse((it['quantity'] ?? 1).toString()) ?? 1.0;
-                              double discountAmount = double.tryParse((it['discount_amount'] ?? 0).toString()) ?? 0.0;
-                              
+                              double price =
+                                  double.tryParse(
+                                    (it['unit_price'] ?? 0).toString(),
+                                  ) ??
+                                  0.0;
+                              double quantity =
+                                  double.tryParse(
+                                    (it['quantity'] ?? 1).toString(),
+                                  ) ??
+                                  1.0;
+                              double discountAmount =
+                                  double.tryParse(
+                                    (it['discount_amount'] ?? 0).toString(),
+                                  ) ??
+                                  0.0;
+
                               double itemDiscount = 0;
                               if (it['discount_type'] == 'percentage') {
                                 itemDiscount = (price * discountAmount) / 100;
@@ -1105,7 +1203,7 @@ class _ProductsState extends State<Products> {
                                   fontWeight: FontWeight.w500,
                                 ),
                               );
-                            }
+                            },
                           ),
                         ),
                       ),
@@ -1141,11 +1239,8 @@ class _ProductsState extends State<Products> {
   Widget _buildQtyControl(Map it, int idx) {
     return Container(
       decoration: BoxDecoration(
-        border: Border.all(
-          color: Colors.grey.shade300,
-        ),
-        borderRadius:
-            BorderRadius.circular(4),
+        border: Border.all(color: Colors.grey.shade300),
+        borderRadius: BorderRadius.circular(4),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1163,11 +1258,7 @@ class _ProductsState extends State<Products> {
               _updateCustomerDisplay();
             },
             child: Container(
-              padding:
-                  const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 4,
-                  ),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
               child: const Icon(
                 Icons.remove,
                 size: 16,
@@ -1175,20 +1266,10 @@ class _ProductsState extends State<Products> {
               ),
             ),
           ),
+          Container(width: 1, height: 24, color: Colors.grey.shade300),
           Container(
-            width: 1,
-            height: 24,
-            color: Colors.grey.shade300,
-          ),
-          Container(
-            padding:
-                const EdgeInsets.symmetric(
-                  horizontal: 6,
-                ),
-            constraints:
-                const BoxConstraints(
-                  minWidth: 30,
-                ),
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            constraints: const BoxConstraints(minWidth: 30),
             child: Center(
               child: Text(
                 '${it['quantity']}',
@@ -1199,11 +1280,7 @@ class _ProductsState extends State<Products> {
               ),
             ),
           ),
-          Container(
-            width: 1,
-            height: 24,
-            color: Colors.grey.shade300,
-          ),
+          Container(width: 1, height: 24, color: Colors.grey.shade300),
           InkWell(
             onTap: () {
               setState(() {
@@ -1213,16 +1290,8 @@ class _ProductsState extends State<Products> {
               _updateCustomerDisplay();
             },
             child: Container(
-              padding:
-                  const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 4,
-                  ),
-              child: const Icon(
-                Icons.add,
-                size: 16,
-                color: Colors.green,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+              child: const Icon(Icons.add, size: 16, color: Colors.green),
             ),
           ),
         ],
@@ -1245,17 +1314,33 @@ class _ProductsState extends State<Products> {
           child: Padding(
             padding: EdgeInsets.all(MySize.size12!),
             child: Row(
-              mainAxisAlignment:
-                  MainAxisAlignment.spaceBetween,
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Expanded(child: _buildSummaryItem('Subtotal', Helper().formatCurrency(subTotal) + symbol)),
+                Expanded(
+                  child: _buildSummaryItem(
+                    'Subtotal',
+                    Helper().formatCurrency(subTotal) + symbol,
+                  ),
+                ),
                 Expanded(
                   child: InkWell(
                     onTap: _showDiscountDialog,
-                    child: _buildSummaryItem('Discount', Helper().formatCurrency(discount) + symbol, color: Colors.red, icon: Icons.edit),
+                    child: _buildSummaryItem(
+                      'Discount',
+                      Helper().formatCurrency(discount) + symbol,
+                      color: Colors.red,
+                      icon: Icons.edit,
+                    ),
                   ),
                 ),
-                Expanded(child: _buildSummaryItem('Total', Helper().formatCurrency(totalPayable) + symbol, color: Colors.green, alignEnd: true)),
+                Expanded(
+                  child: _buildSummaryItem(
+                    'Total',
+                    Helper().formatCurrency(totalPayable) + symbol,
+                    color: Colors.green,
+                    alignEnd: true,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1266,9 +1351,17 @@ class _ProductsState extends State<Products> {
     );
   }
 
-  Widget _buildSummaryItem(String label, String value, {Color? color, IconData? icon, bool alignEnd = false}) {
+  Widget _buildSummaryItem(
+    String label,
+    String value, {
+    Color? color,
+    IconData? icon,
+    bool alignEnd = false,
+  }) {
     return Column(
-      crossAxisAlignment: alignEnd ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+      crossAxisAlignment: alignEnd
+          ? CrossAxisAlignment.end
+          : CrossAxisAlignment.start,
       children: [
         Row(
           mainAxisSize: MainAxisSize.min,
@@ -1389,7 +1482,13 @@ class _ProductsState extends State<Products> {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Colors.white,
-        boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 4, offset: const Offset(0, -2))]
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black12,
+            blurRadius: 4,
+            offset: const Offset(0, -2),
+          ),
+        ],
       ),
       child: Row(
         children: [
@@ -1398,8 +1497,17 @@ class _ProductsState extends State<Products> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text('Total: ${Helper().formatCurrency(getCartTotal())} $symbol', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                Text('${cartItems.length} items', style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
+                Text(
+                  'Total: ${Helper().formatCurrency(getCartTotal())} $symbol',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+                Text(
+                  '${cartItems.length} items',
+                  style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                ),
               ],
             ),
           ),
@@ -1444,7 +1552,8 @@ class _ProductsState extends State<Products> {
                           fontWeight: 500,
                         ),
                         decoration: InputDecoration(
-                          hintText: AppLocalizations.of(context).translate('search'),
+                          hintText: AppLocalizations.of(context)
+                              .translate('search'),
                           hintStyle: AppTheme.getTextStyle(
                             themeData.textTheme.titleSmall,
                             letterSpacing: 0,
@@ -1458,7 +1567,9 @@ class _ProductsState extends State<Products> {
                           prefixIcon: Icon(
                             Symbols.search,
                             size: 22,
-                            color: themeData.colorScheme.onSurface.withAlpha(150),
+                            color: themeData.colorScheme.onSurface.withAlpha(
+                              150,
+                            ),
                           ),
                           isDense: true,
                           contentPadding: const EdgeInsets.only(right: 16),
@@ -1467,15 +1578,17 @@ class _ProductsState extends State<Products> {
                         controller: searchController,
                         onChanged: (value) {
                           if (_debounce?.isActive ?? false) _debounce!.cancel();
-                          _debounce =
-                              Timer(const Duration(milliseconds: 300), () {
-                            setState(() {
-                              products = [];
-                              offset = 0;
-                              isLoadingProducts = false; // Allow new search
-                            });
-                            productList();
-                          });
+                          _debounce = Timer(
+                            const Duration(milliseconds: 300),
+                            () {
+                              setState(() {
+                                products = [];
+                                offset = 0;
+                                isLoadingProducts = false; // Allow new search
+                              });
+                              productList();
+                            },
+                          );
                         },
                         onEditingComplete: () {
                           setState(() {
@@ -1590,17 +1703,24 @@ class _ProductsState extends State<Products> {
         Expanded(
           child: products.isEmpty
               ? (isLoadingProducts
-                  ? Center(child: Helper().loadingIndicator(context))
-                  : Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.hourglass_empty, size: 48, color: Colors.grey),
-                          const SizedBox(height: 16),
-                          Text(AppLocalizations.of(context).translate('no_products_found')),
-                        ],
-                      ),
-                    ))
+                    ? Center(child: Helper().loadingIndicator(context))
+                    : Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(
+                              Icons.hourglass_empty,
+                              size: 48,
+                              color: Colors.grey,
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              AppLocalizations.of(context)
+                                  .translate('no_products_found'),
+                            ),
+                          ],
+                        ),
+                      ))
               : Stack(
                   children: [
                     CustomScrollView(
@@ -1611,18 +1731,26 @@ class _ProductsState extends State<Products> {
                           SliverPadding(
                             padding: const EdgeInsets.symmetric(horizontal: 4),
                             sliver: SliverGrid(
-                              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                                crossAxisCount: crossAxisCount,
-                                crossAxisSpacing: 10,
-                                mainAxisSpacing: 10,
-                                childAspectRatio: 0.8,
-                              ),
-                              delegate: SliverChildBuilderDelegate((context, index) {
+                              gridDelegate:
+                                  SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: crossAxisCount,
+                                    crossAxisSpacing: 10,
+                                    mainAxisSpacing: 10,
+                                    childAspectRatio: 0.8,
+                                  ),
+                              delegate: SliverChildBuilderDelegate((
+                                context,
+                                index,
+                              ) {
                                 var product = products[index];
-                                var effId = product['variation_id'] ?? product['product_id'];
+                                var effId =
+                                    product['variation_id'] ??
+                                    product['product_id'];
                                 String effIdStr = effId?.toString() ?? '';
                                 int cartIdx = cartItems.indexWhere(
-                                  (item) => (item['id']?.toString() ?? '') == effIdStr,
+                                  (item) =>
+                                      (item['id']?.toString() ?? '') ==
+                                      effIdStr,
                                 );
 
                                 return InkWell(
@@ -1632,10 +1760,14 @@ class _ProductsState extends State<Products> {
                                       _ProductGridWidget(
                                         name: product['display_name'],
                                         image: product['product_image_url'],
-                                        qtyAvailable: (product['enable_stock'] != 0)
-                                            ? product['stock_available'].toString()
+                                        qtyAvailable:
+                                            (product['enable_stock'] != 0)
+                                            ? product['stock_available']
+                                                  .toString()
                                             : '-',
-                                        price: double.parse(product['unit_price'].toString()),
+                                        price: double.parse(
+                                          product['unit_price'].toString(),
+                                        ),
                                         symbol: symbol,
                                         cardColor: [
                                           Colors.blue.shade50,
@@ -1653,20 +1785,39 @@ class _ProductsState extends State<Products> {
                                           top: 6,
                                           right: 6,
                                           child: GestureDetector(
-                                            onTap: () => _showEditCartDialog(product),
+                                            onTap: () =>
+                                                _showEditCartDialog(product),
                                             child: Container(
-                                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 8,
+                                                    vertical: 4,
+                                                  ),
                                               decoration: BoxDecoration(
-                                                color: Colors.white.withValues(alpha: 0.9),
-                                                borderRadius: BorderRadius.circular(12),
-                                                boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 4)],
+                                                color: Colors.white.withValues(
+                                                  alpha: 0.9,
+                                                ),
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                                boxShadow: const [
+                                                  BoxShadow(
+                                                    color: Colors.black12,
+                                                    blurRadius: 4,
+                                                  ),
+                                                ],
                                               ),
                                               child: Row(
                                                 mainAxisSize: MainAxisSize.min,
                                                 children: [
-                                                  const Icon(Icons.shopping_cart_outlined, size: 16),
+                                                  const Icon(
+                                                    Icons
+                                                        .shopping_cart_outlined,
+                                                    size: 16,
+                                                  ),
                                                   const SizedBox(width: 6),
-                                                  Text('${cartItems[cartIdx]['quantity'] ?? 0}'),
+                                                  Text(
+                                                    '${cartItems[cartIdx]['quantity'] ?? 0}',
+                                                  ),
                                                 ],
                                               ),
                                             ),
@@ -1682,14 +1833,19 @@ class _ProductsState extends State<Products> {
                           child: isLoadingProducts
                               ? Padding(
                                   padding: const EdgeInsets.all(16.0),
-                                  child: Center(child: Helper().loadingIndicator(context)),
+                                  child: Center(
+                                    child: Helper().loadingIndicator(context),
+                                  ),
                                 )
                               : const SizedBox(height: 100),
                         ),
                       ],
                     ),
                     if (isLoadingProducts && products.isEmpty)
-                      Helper().loadingIndicator(context, subTitle: 'LOADING PRODUCTS...'),
+                      Helper().loadingIndicator(
+                        context,
+                        subTitle: 'LOADING PRODUCTS...',
+                      ),
                   ],
                 ),
         ),
@@ -1707,12 +1863,19 @@ class _ProductsState extends State<Products> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             Container(
-              padding: EdgeInsets.only(top: MySize.size24 ?? 24.0, bottom: MySize.size24 ?? 24.0),
+              padding: EdgeInsets.only(
+                top: MySize.size24 ?? 24.0,
+                bottom: MySize.size24 ?? 24.0,
+              ),
               alignment: Alignment.center,
               child: Center(
                 child: Text(
                   AppLocalizations.of(context).translate('sort'),
-                  style: AppTheme.getTextStyle(themeData.textTheme.titleMedium, fontWeight: 700, color: themeData.colorScheme.primary),
+                  style: AppTheme.getTextStyle(
+                    themeData.textTheme.titleMedium,
+                    fontWeight: 700,
+                    color: themeData.colorScheme.primary,
+                  ),
                 ),
               ),
             ),
@@ -1740,21 +1903,55 @@ class _ProductsState extends State<Products> {
                         margin: EdgeInsets.only(left: MySize.size16 ?? 16.0),
                         decoration: BoxDecoration(
                           color: Colors.white,
-                          borderRadius: BorderRadius.all(Radius.circular(MySize.size16 ?? 16.0)),
+                          borderRadius: BorderRadius.all(
+                            Radius.circular(MySize.size16 ?? 16.0),
+                          ),
                           boxShadow: [
                             BoxShadow(
-                              color: themeData.cardTheme.shadowColor?.withAlpha(48) ?? Colors.black.withAlpha(48),
+                              color:
+                                  themeData.cardTheme.shadowColor?.withAlpha(
+                                    48,
+                                  ) ??
+                                  Colors.black.withAlpha(48),
                               blurRadius: (byAlphabets != null) ? 5 : 0,
-                              offset: (byAlphabets != null) ? const Offset(3, 3) : const Offset(0, 0),
+                              offset: (byAlphabets != null)
+                                  ? const Offset(3, 3)
+                                  : const Offset(0, 0),
                             ),
                           ],
                         ),
                         padding: EdgeInsets.all(MySize.size12 ?? 12.0),
                         child: Row(
                           children: [
-                            Text("A", style: AppTheme.getTextStyle(themeData.textTheme.titleMedium, fontWeight: 700, color: (byAlphabets != null) ? themeData.colorScheme.primary : Colors.grey)),
-                            Icon((byAlphabets == 1) ? Symbols.arrow_left : Symbols.arrow_right, color: (byAlphabets != null) ? themeData.colorScheme.primary : Colors.grey, size: 22),
-                            Text("Z", style: AppTheme.getTextStyle(themeData.textTheme.titleMedium, fontWeight: 700, color: (byAlphabets != null) ? themeData.colorScheme.primary : Colors.grey)),
+                            Text(
+                              "A",
+                              style: AppTheme.getTextStyle(
+                                themeData.textTheme.titleMedium,
+                                fontWeight: 700,
+                                color: (byAlphabets != null)
+                                    ? themeData.colorScheme.primary
+                                    : Colors.grey,
+                              ),
+                            ),
+                            Icon(
+                              (byAlphabets == 1)
+                                  ? Symbols.arrow_left
+                                  : Symbols.arrow_right,
+                              color: (byAlphabets != null)
+                                  ? themeData.colorScheme.primary
+                                  : Colors.grey,
+                              size: 22,
+                            ),
+                            Text(
+                              "Z",
+                              style: AppTheme.getTextStyle(
+                                themeData.textTheme.titleMedium,
+                                fontWeight: 700,
+                                color: (byAlphabets != null)
+                                    ? themeData.colorScheme.primary
+                                    : Colors.grey,
+                              ),
+                            ),
                           ],
                         ),
                       ),
@@ -1778,20 +1975,45 @@ class _ProductsState extends State<Products> {
                         margin: EdgeInsets.only(left: MySize.size16 ?? 16.0),
                         decoration: BoxDecoration(
                           color: Colors.white,
-                          borderRadius: BorderRadius.all(Radius.circular(MySize.size16 ?? 16.0)),
+                          borderRadius: BorderRadius.all(
+                            Radius.circular(MySize.size16 ?? 16.0),
+                          ),
                           boxShadow: [
                             BoxShadow(
-                              color: themeData.cardTheme.shadowColor?.withAlpha(48) ?? Colors.black.withAlpha(48),
+                              color:
+                                  themeData.cardTheme.shadowColor?.withAlpha(
+                                    48,
+                                  ) ??
+                                  Colors.black.withAlpha(48),
                               blurRadius: (byPrice != null) ? 5 : 0,
-                              offset: (byPrice != null) ? const Offset(3, 3) : const Offset(0, 0),
+                              offset: (byPrice != null)
+                                  ? const Offset(3, 3)
+                                  : const Offset(0, 0),
                             ),
                           ],
                         ),
                         padding: EdgeInsets.all(MySize.size12 ?? 12.0),
                         child: Row(
                           children: [
-                            Text(AppLocalizations.of(context).translate('price'), style: AppTheme.getTextStyle(themeData.textTheme.titleMedium, fontWeight: 700, color: (byPrice != null) ? themeData.colorScheme.primary : Colors.grey)),
-                            Icon((byPrice == 1) ? Symbols.arrow_downward : Symbols.arrow_upward, color: (byPrice != null) ? themeData.colorScheme.primary : Colors.grey, size: 22),
+                            Text(
+                              AppLocalizations.of(context).translate('price'),
+                              style: AppTheme.getTextStyle(
+                                themeData.textTheme.titleMedium,
+                                fontWeight: 700,
+                                color: (byPrice != null)
+                                    ? themeData.colorScheme.primary
+                                    : Colors.grey,
+                              ),
+                            ),
+                            Icon(
+                              (byPrice == 1)
+                                  ? Symbols.arrow_downward
+                                  : Symbols.arrow_upward,
+                              color: (byPrice != null)
+                                  ? themeData.colorScheme.primary
+                                  : Colors.grey,
+                              size: 22,
+                            ),
                           ],
                         ),
                       ),
@@ -1806,7 +2028,11 @@ class _ProductsState extends State<Products> {
               child: Center(
                 child: Text(
                   AppLocalizations.of(context).translate('filter'),
-                  style: AppTheme.getTextStyle(themeData.textTheme.titleMedium, fontWeight: 700, color: themeData.colorScheme.primary),
+                  style: AppTheme.getTextStyle(
+                    themeData.textTheme.titleMedium,
+                    fontWeight: 700,
+                    color: themeData.colorScheme.primary,
+                  ),
                 ),
               ),
             ),
@@ -1814,13 +2040,20 @@ class _ProductsState extends State<Products> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
                 Container(
-                  padding: EdgeInsets.only(left: MySize.size16!, right: MySize.size16!),
+                  padding: EdgeInsets.only(
+                    left: MySize.size16!,
+                    right: MySize.size16!,
+                  ),
                   child: CheckboxListTile(
-                    title: Text(AppLocalizations.of(context).translate('in_stock')),
+                    title: Text(
+                      AppLocalizations.of(context).translate('in_stock'),
+                    ),
                     controlAffinity: ListTileControlAffinity.leading,
                     value: inStock,
                     onChanged: (newValue) {
-                      setState(() { inStock = newValue!; });
+                      setState(() {
+                        inStock = newValue!;
+                      });
                       products = [];
                       offset = 0;
                       productList();
@@ -1828,21 +2061,43 @@ class _ProductsState extends State<Products> {
                   ),
                 ),
                 Container(
-                  padding: EdgeInsets.only(left: MySize.size16!, right: MySize.size16!),
+                  padding: EdgeInsets.only(
+                    left: MySize.size16!,
+                    right: MySize.size16!,
+                  ),
                   child: CheckboxListTile(
                     title: const Text('Allow Overselling'),
                     controlAffinity: ListTileControlAffinity.leading,
                     value: allowOverselling,
-                    onChanged: (newValue) { setState(() { allowOverselling = newValue!; }); },
+                    onChanged: (newValue) {
+                      setState(() {
+                        allowOverselling = newValue!;
+                      });
+                    },
                   ),
                 ),
                 const Divider(),
                 Container(
-                  padding: EdgeInsets.only(left: MySize.size16!, right: MySize.size16!, top: MySize.size16!),
-                  child: Text(AppLocalizations.of(context).translate('categories'), style: AppTheme.getTextStyle(themeData.textTheme.bodyLarge, fontWeight: 600, letterSpacing: 0)),
+                  padding: EdgeInsets.only(
+                    left: MySize.size16!,
+                    right: MySize.size16!,
+                    top: MySize.size16!,
+                  ),
+                  child: Text(
+                    AppLocalizations.of(context).translate('categories'),
+                    style: AppTheme.getTextStyle(
+                      themeData.textTheme.bodyLarge,
+                      fontWeight: 600,
+                      letterSpacing: 0,
+                    ),
+                  ),
                 ),
                 Container(
-                  padding: EdgeInsets.only(left: MySize.size16!, right: MySize.size16!, top: MySize.size8!),
+                  padding: EdgeInsets.only(
+                    left: MySize.size16!,
+                    right: MySize.size16!,
+                    top: MySize.size8!,
+                  ),
                   child: DropdownButtonHideUnderline(
                     child: _categoryMenuItems.isEmpty
                         ? Container()
@@ -1850,7 +2105,14 @@ class _ProductsState extends State<Products> {
                             isExpanded: true,
                             dropdownColor: Colors.white,
                             icon: const Icon(Icons.arrow_drop_down),
-                            value: _categoryMenuItems.any((item) => item.value == categoryId) ? categoryId : (_categoryMenuItems.isNotEmpty ? _categoryMenuItems[0].value : 0),
+                            value:
+                                _categoryMenuItems.any(
+                                  (item) => item.value == categoryId,
+                                )
+                                ? categoryId
+                                : (_categoryMenuItems.isNotEmpty
+                                      ? _categoryMenuItems[0].value
+                                      : 0),
                             items: _categoryMenuItems,
                             onChanged: (int? newValue) {
                               setState(() {
@@ -1867,11 +2129,26 @@ class _ProductsState extends State<Products> {
                 ),
                 const Divider(),
                 Container(
-                  padding: EdgeInsets.only(left: MySize.size16!, right: MySize.size16!, top: MySize.size16!),
-                  child: Text(AppLocalizations.of(context).translate('sub_categories'), style: AppTheme.getTextStyle(themeData.textTheme.bodyLarge, fontWeight: 600, letterSpacing: 0)),
+                  padding: EdgeInsets.only(
+                    left: MySize.size16!,
+                    right: MySize.size16!,
+                    top: MySize.size16!,
+                  ),
+                  child: Text(
+                    AppLocalizations.of(context).translate('sub_categories'),
+                    style: AppTheme.getTextStyle(
+                      themeData.textTheme.bodyLarge,
+                      fontWeight: 600,
+                      letterSpacing: 0,
+                    ),
+                  ),
                 ),
                 Container(
-                  padding: EdgeInsets.only(left: MySize.size16!, right: MySize.size16!, top: MySize.size8!),
+                  padding: EdgeInsets.only(
+                    left: MySize.size16!,
+                    right: MySize.size16!,
+                    top: MySize.size8!,
+                  ),
                   child: DropdownButtonHideUnderline(
                     child: _subCategoryMenuItems.isEmpty
                         ? Container()
@@ -1879,10 +2156,19 @@ class _ProductsState extends State<Products> {
                             isExpanded: true,
                             dropdownColor: Colors.white,
                             icon: const Icon(Icons.arrow_drop_down),
-                            value: _subCategoryMenuItems.any((item) => item.value == subCategoryId) ? subCategoryId : (_subCategoryMenuItems.isNotEmpty ? _subCategoryMenuItems[0].value : 0),
+                            value:
+                                _subCategoryMenuItems.any(
+                                  (item) => item.value == subCategoryId,
+                                )
+                                ? subCategoryId
+                                : (_subCategoryMenuItems.isNotEmpty
+                                      ? _subCategoryMenuItems[0].value
+                                      : 0),
                             items: _subCategoryMenuItems,
                             onChanged: (int? newValue) {
-                              setState(() { subCategoryId = newValue!; });
+                              setState(() {
+                                subCategoryId = newValue!;
+                              });
                               products = [];
                               offset = 0;
                               productList();
@@ -1892,11 +2178,26 @@ class _ProductsState extends State<Products> {
                 ),
                 const Divider(),
                 Container(
-                  padding: EdgeInsets.only(left: MySize.size16!, right: MySize.size16!, top: MySize.size16!),
-                  child: Text(AppLocalizations.of(context).translate('brands'), style: AppTheme.getTextStyle(themeData.textTheme.bodyLarge, fontWeight: 600, letterSpacing: 0)),
+                  padding: EdgeInsets.only(
+                    left: MySize.size16!,
+                    right: MySize.size16!,
+                    top: MySize.size16!,
+                  ),
+                  child: Text(
+                    AppLocalizations.of(context).translate('brands'),
+                    style: AppTheme.getTextStyle(
+                      themeData.textTheme.bodyLarge,
+                      fontWeight: 600,
+                      letterSpacing: 0,
+                    ),
+                  ),
                 ),
                 Container(
-                  padding: EdgeInsets.only(left: MySize.size16!, right: MySize.size16!, top: 0),
+                  padding: EdgeInsets.only(
+                    left: MySize.size16!,
+                    right: MySize.size16!,
+                    top: 0,
+                  ),
                   child: DropdownButtonHideUnderline(
                     child: _brandsMenuItems.isEmpty
                         ? Container()
@@ -1904,10 +2205,19 @@ class _ProductsState extends State<Products> {
                             isExpanded: true,
                             dropdownColor: Colors.white,
                             icon: const Icon(Icons.arrow_drop_down),
-                            value: _brandsMenuItems.any((item) => item.value == brandId) ? brandId : (_brandsMenuItems.isNotEmpty ? _brandsMenuItems[0].value : 0),
+                            value:
+                                _brandsMenuItems.any(
+                                  (item) => item.value == brandId,
+                                )
+                                ? brandId
+                                : (_brandsMenuItems.isNotEmpty
+                                      ? _brandsMenuItems[0].value
+                                      : 0),
                             items: _brandsMenuItems,
                             onChanged: (int? newValue) {
-                              setState(() { brandId = newValue!; });
+                              setState(() {
+                                brandId = newValue!;
+                              });
                               products = [];
                               offset = 0;
                               productList();
@@ -1923,12 +2233,20 @@ class _ProductsState extends State<Products> {
               child: Center(
                 child: Text(
                   AppLocalizations.of(context).translate('group_prices'),
-                  style: AppTheme.getTextStyle(themeData.textTheme.titleMedium, fontWeight: 700, color: themeData.colorScheme.primary),
+                  style: AppTheme.getTextStyle(
+                    themeData.textTheme.titleMedium,
+                    fontWeight: 700,
+                    color: themeData.colorScheme.primary,
+                  ),
                 ),
               ),
             ),
             Container(
-              padding: EdgeInsets.only(left: MySize.size16!, right: MySize.size16!, top: 0),
+              padding: EdgeInsets.only(
+                left: MySize.size16!,
+                right: MySize.size16!,
+                top: 0,
+              ),
               child: DropdownButtonHideUnderline(
                 child: _priceGroupMenuItems.isEmpty
                     ? Container()
@@ -1936,7 +2254,14 @@ class _ProductsState extends State<Products> {
                         isExpanded: true,
                         dropdownColor: Colors.white,
                         icon: const Icon(Icons.arrow_drop_down),
-                        value: _priceGroupMenuItems.any((item) => item.value == usePriceGroup) ? usePriceGroup : (_priceGroupMenuItems.isNotEmpty ? _priceGroupMenuItems[0].value : false),
+                        value:
+                            _priceGroupMenuItems.any(
+                              (item) => item.value == usePriceGroup,
+                            )
+                            ? usePriceGroup
+                            : (_priceGroupMenuItems.isNotEmpty
+                                  ? _priceGroupMenuItems[0].value
+                                  : false),
                         items: _priceGroupMenuItems,
                         onChanged: (bool? newValue) async {
                           await _showCartResetDialogForPriceGroup();
@@ -1968,12 +2293,17 @@ class _ProductsState extends State<Products> {
                 onPressed: () => Navigator.pop(context),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xff4c53a5),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
                   padding: const EdgeInsets.symmetric(vertical: 14),
                 ),
                 child: Text(
                   AppLocalizations.of(context).translate('close'),
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
             ),
@@ -1985,20 +2315,27 @@ class _ProductsState extends State<Products> {
 
   getScannedProduct(String barcode) async {
     if (!canMakeSell) {
-      _showSafeToast(AppLocalizations.of(context).translate('no_subscription_found'));
+      _showSafeToast(
+        AppLocalizations.of(context).translate('no_subscription_found'),
+      );
       return;
     }
 
     try {
       final value = await Variations().get(
-          locationId: selectedLocationId,
-          barcode: barcode,
-          offset: 0,
-          searchTerm: searchController.text);
+        locationId: selectedLocationId,
+        barcode: barcode,
+        offset: 0,
+        searchTerm: searchController.text,
+      );
 
       if (!canAddSell) {
         if (mounted) {
-           Helper().showNotification(context, AppLocalizations.of(context).translate("no_sells_permission"), isError: true);
+          Helper().showNotification(
+            context,
+            AppLocalizations.of(context).translate("no_sells_permission"),
+            isError: true,
+          );
         }
         return;
       }
@@ -2014,29 +2351,44 @@ class _ProductsState extends State<Products> {
             });
           } catch (_) {}
         }
-        
+
         var product = ProductModel().product(value[0], price);
         if (product != null) {
-          if (!allowOverselling && (double.tryParse(product['stock_available']?.toString() ?? '0') ?? 0) <= 0) {
+          if (!allowOverselling &&
+              (double.tryParse(product['stock_available']?.toString() ?? '0') ??
+                      0) <=
+                  0) {
             if (mounted) {
-               Helper().showNotification(context, AppLocalizations.of(context).translate("out_of_stock"), isError: true);
+              Helper().showNotification(
+                context,
+                AppLocalizations.of(context).translate("out_of_stock"),
+                isError: true,
+              );
             }
             return;
           }
 
           _addToCartFromProduct(product);
           if (mounted) {
-             Helper().showNotification(context, AppLocalizations.of(context).translate('added_to_cart'));
+            Helper().showNotification(
+              context,
+              AppLocalizations.of(context).translate('added_to_cart'),
+            );
           }
 
-          int? targetSellId = activeSellId ?? (argument != null ? argument!['sellId'] : null);
+          int? targetSellId =
+              activeSellId ?? (argument != null ? argument!['sellId'] : null);
           if (targetSellId != null) {
             await Sell().addToCart(product, targetSellId);
           }
         }
       } else {
         if (mounted) {
-           Helper().showNotification(context, AppLocalizations.of(context).translate("no_product_found"), isError: true);
+          Helper().showNotification(
+            context,
+            AppLocalizations.of(context).translate("no_product_found"),
+            isError: true,
+          );
         }
       }
     } catch (e) {
@@ -2047,21 +2399,35 @@ class _ProductsState extends State<Products> {
   onTapProduct(int index) async {
     if (!canAddSell) {
       if (mounted) {
-        Helper().showNotification(context, AppLocalizations.of(context).translate("no_sells_permission"), isError: true);
+        Helper().showNotification(
+          context,
+          AppLocalizations.of(context).translate("no_sells_permission"),
+          isError: true,
+        );
       }
       return;
     }
     if (!canMakeSell) {
       if (mounted) {
-        Helper().showNotification(context, AppLocalizations.of(context).translate('no_subscription_found'), isError: true);
+        Helper().showNotification(
+          context,
+          AppLocalizations.of(context).translate('no_subscription_found'),
+          isError: true,
+        );
       }
       return;
     }
 
     final product = products[index];
-    if (!allowOverselling && (double.tryParse(product['stock_available']?.toString() ?? '0') ?? 0) <= 0) {
+    if (!allowOverselling &&
+        (double.tryParse(product['stock_available']?.toString() ?? '0') ?? 0) <=
+            0) {
       if (mounted) {
-        Helper().showNotification(context, AppLocalizations.of(context).translate("out_of_stock"), isError: true);
+        Helper().showNotification(
+          context,
+          AppLocalizations.of(context).translate("out_of_stock"),
+          isError: true,
+        );
       }
       return;
     }
@@ -2070,11 +2436,15 @@ class _ProductsState extends State<Products> {
       // 1. Update UI State
       _addToCartFromProduct(product);
       if (mounted) {
-        Helper().showNotification(context, AppLocalizations.of(context).translate('added_to_cart'));
+        Helper().showNotification(
+          context,
+          AppLocalizations.of(context).translate('added_to_cart'),
+        );
       }
 
       // 2. Persist to Database if we are in a sale context
-      int? targetSellId = activeSellId ?? (argument != null ? argument!['sellId'] : null);
+      int? targetSellId =
+          activeSellId ?? (argument != null ? argument!['sellId'] : null);
       if (targetSellId != null) {
         await Sell().addToCart(product, targetSellId);
       }
@@ -2086,22 +2456,34 @@ class _ProductsState extends State<Products> {
   onExpressCheckout(int index) async {
     if (!canAddSell || !canMakeSell) {
       if (mounted) {
-        Helper().showNotification(context, AppLocalizations.of(context).translate('no_permission'), isError: true);
+        Helper().showNotification(
+          context,
+          AppLocalizations.of(context).translate('no_permission'),
+          isError: true,
+        );
       }
       return;
     }
     if (!allowOverselling && products[index]['stock_available'] <= 0) {
       if (mounted) {
-        Helper().showNotification(context, AppLocalizations.of(context).translate('out_of_stock'), isError: true);
+        Helper().showNotification(
+          context,
+          AppLocalizations.of(context).translate('out_of_stock'),
+          isError: true,
+        );
       }
       return;
     }
     _addToCartFromProduct(products[index]);
     try {
-      String invoiceNo = await Helper().generateRefNumber('sell', locationId: selectedLocationId);
+      String invoiceNo = await Helper().generateRefNumber(
+        'sell',
+        locationId: selectedLocationId,
+      );
       Map<String, dynamic> sellData = await Sell().createSell(
         invoiceNo: invoiceNo,
-        transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss").format(DateTime.now()),
+        transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss")
+            .format(DateTime.now()),
         contactId: selectedCustomerId,
         locId: selectedLocationId,
         discountAmount: discountAmount,
@@ -2112,20 +2494,51 @@ class _ProductsState extends State<Products> {
         saleStatus: 'draft',
       );
       var sellId = await SellDatabase().storeSell(sellData);
-      for (var item in cartItems) { await Sell().addToCart(item, sellId); }
+      for (var item in cartItems) {
+        await Sell().addToCart(item, sellId);
+      }
       if (!mounted) return;
-      var result = await Navigator.of(context).push(MaterialPageRoute<bool>(builder: (ctx) => CheckOut(initialArgument: Helper().argument(invoiceAmount: getCartTotal(), customerId: selectedCustomerId, locId: selectedLocationId, sellId: sellId), replaceRootOnComplete: false), fullscreenDialog: true));
-      if (result == true) { 
+      var result = await Navigator.of(context).push(
+        MaterialPageRoute<bool>(
+          builder: (ctx) => CheckOut(
+            initialArgument: Helper().argument(
+              invoiceAmount: getCartTotal(),
+              customerId: selectedCustomerId,
+              locId: selectedLocationId,
+              sellId: sellId,
+            ),
+            replaceRootOnComplete: false,
+          ),
+          fullscreenDialog: true,
+        ),
+      );
+      if (result == true) {
         if (mounted) {
-          setState(() { cartItems.clear(); }); 
+          setState(() {
+            cartItems.clear();
+          });
           _updateCustomerDisplay();
         }
       }
-    } catch (e) { 
+    } catch (e) {
       if (mounted) {
-        Helper().showNotification(context, '$e', isError: true); 
+        Helper().showNotification(context, '$e', isError: true);
       }
     }
+  }
+
+  void _printSaleInBackground(int sellId) {
+    final hasKitchen = PrinterService().printKitchenCopy;
+    unawaited(() async {
+      try {
+        await Helper().printDocument(sellId, 0, context, keepAlive: hasKitchen);
+        if (hasKitchen) {
+          await Helper().printKitchenDocument(sellId, context);
+        }
+      } catch (e, stackTrace) {
+        debugPrint('Background sale printing failed: $e\n$stackTrace');
+      }
+    }());
   }
 
   finalizeExpressSale({String method = 'cash'}) async {
@@ -2137,20 +2550,24 @@ class _ProductsState extends State<Products> {
         Helper().showNotification(context, "Cart is empty", isError: true);
         return;
       }
-      String invoiceNo = await Helper().generateRefNumber('sell', locationId: selectedLocationId);
+      String invoiceNo = await Helper().generateRefNumber(
+        'sell',
+        locationId: selectedLocationId,
+      );
       Map<String, dynamic> sellData = await Sell().createSell(
-          invoiceNo: invoiceNo,
-          transactionDate:
-              DateFormat("yyyy-MM-dd HH:mm:ss").format(DateTime.now()),
-          contactId: selectedCustomerId,
-          locId: selectedLocationId,
-          discountAmount: discountAmount,
-          discountType: discountType,
-          invoiceAmount: totalAmount,
-          changeReturn: 0.0,
-          pending: 0.0,
-          saleStatus: 'final',
-          sellId: activeSellId);
+        invoiceNo: invoiceNo,
+        transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss")
+            .format(DateTime.now()),
+        contactId: selectedCustomerId,
+        locId: selectedLocationId,
+        discountAmount: discountAmount,
+        discountType: discountType,
+        invoiceAmount: totalAmount,
+        changeReturn: 0.0,
+        pending: 0.0,
+        saleStatus: 'final',
+        sellId: activeSellId,
+      );
 
       int sellId;
       if (activeSellId != null) {
@@ -2170,7 +2587,7 @@ class _ProductsState extends State<Products> {
           'unit_price': item['unit_price'],
           'discount_amount': item['discount_amount'] ?? 0.0,
           'discount_type': item['discount_type'] ?? 'fixed',
-          'is_completed': 1
+          'is_completed': 1,
         };
         await SellDatabase().store(sellLine);
       }
@@ -2179,8 +2596,9 @@ class _ProductsState extends State<Products> {
       try {
         List methods = await System().get('payment_method', selectedLocationId);
         var selectedMethod = methods.firstWhere(
-            (m) => m['name'].toString().toLowerCase() == method.toLowerCase(),
-            orElse: () => null);
+          (m) => m['name'].toString().toLowerCase() == method.toLowerCase(),
+          orElse: () => null,
+        );
         if (selectedMethod != null && selectedMethod['account_id'] != null) {
           accountId = int.tryParse(selectedMethod['account_id'].toString());
         }
@@ -2190,15 +2608,10 @@ class _ProductsState extends State<Products> {
           'method': method,
           'amount': totalAmount,
           'note': '${method[0].toUpperCase()}${method.substring(1)} Checkout',
-          'account_id': accountId
-        }
+          'account_id': accountId,
+        },
       ], sellId);
-      final printerService = PrinterService();
-      bool hasKitchen = printerService.printKitchenCopy;
-      await Helper().printDocument(sellId, 0, context, keepAlive: hasKitchen);
-      if (hasKitchen) {
-        await Helper().printKitchenDocument(sellId, context);
-      }
+      _printSaleInBackground(sellId);
       if (await Helper().checkConnectivity()) {
         Sell().createApiSell(sellId: sellId, force: true);
         // Send WhatsApp notification in background
@@ -2207,7 +2620,11 @@ class _ProductsState extends State<Products> {
       Helper().showNotification(context, "Success ✅");
       _resetCartState();
     } catch (e) {
-      Helper().showNotification(context, '$method checkout failed: $e', isError: true);
+      Helper().showNotification(
+        context,
+        '$method checkout failed: $e',
+        isError: true,
+      );
     } finally {
       setState(() => isProcessingSale = false);
     }
@@ -2215,47 +2632,94 @@ class _ProductsState extends State<Products> {
 
   finalizeDraftSale() async {
     if (isProcessingSale) return;
-    
+
     double totalAmount = getCartTotal();
     if (totalAmount <= 0) {
       Helper().showNotification(context, "Cart is empty", isError: true);
       return;
     }
 
-    // Guard: Prevent credit/draft sales for Walk-in or no-phone customers
-    if (selectedCustomerId == 0 || selectedCustomerId == 1) {
-      _showErrorPopup("Credit sales (Draft) not allowed for Walk-in Customer. Please select a registered customer.");
+    // Guard: Prevent credit/draft sales for Walk-in or no-phone customers.
+    final customer = await Contact().getCustomerDetailById(selectedCustomerId);
+    final customerName = (customer?['name'] ?? '')
+        .toString()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]'), '');
+    final customerCode = (customer?['contact_id'] ?? '')
+        .toString()
+        .trim()
+        .toUpperCase();
+    if (selectedCustomerId == 0 ||
+        customerName == 'walkincustomer' ||
+        customerCode == 'CO0001') {
+      _showErrorPopup(
+        "Credit sales (Draft) not allowed for Walk-in Customer. Please select a registered customer.",
+      );
       return;
     }
 
-    final customer = await Contact().getCustomerDetailById(selectedCustomerId);
-    if (customer == null || customer['mobile'] == null || customer['mobile'].toString().trim().isEmpty) {
+    if (customer == null ||
+        customer['mobile'] == null ||
+        customer['mobile'].toString().trim().isEmpty) {
       _showErrorPopup("Customer phone number is required for credit sales.");
       return;
     }
 
     // Optional Credit Limit Check
-    double creditLimit = double.tryParse((customer['credit_limit'] ?? 0.0).toString()) ?? 0.0;
-    double totalDue = double.tryParse((customer['total_due'] ?? 0.0).toString()) ?? 0.0;
-    
+    double creditLimit =
+        double.tryParse((customer['credit_limit'] ?? 0.0).toString()) ?? 0.0;
+    double totalDue =
+        double.tryParse((customer['total_due'] ?? 0.0).toString()) ?? 0.0;
+
     if (creditLimit > 0 && (totalDue + totalAmount) > creditLimit) {
-      _showErrorPopup("Credit limit exceeded. Available credit: $symbol${(creditLimit - totalDue).toStringAsFixed(2)}");
+      _showErrorPopup(
+        "Credit limit exceeded. Available credit: $symbol${(creditLimit - totalDue).toStringAsFixed(2)}",
+      );
       return;
     }
 
     setState(() => isProcessingSale = true);
     try {
-      String invoiceNo = await Helper().generateRefNumber('sell', locationId: selectedLocationId);
-      Map<String, dynamic> sellData = await Sell().createSell(invoiceNo: invoiceNo, transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss").format(DateTime.now()), contactId: selectedCustomerId, locId: selectedLocationId, discountAmount: discountAmount, discountType: discountType, invoiceAmount: totalAmount, changeReturn: 0.0, pending: totalAmount, saleStatus: 'draft');
+      String invoiceNo = await Helper().generateRefNumber(
+        'sell',
+        locationId: selectedLocationId,
+      );
+      Map<String, dynamic> sellData = await Sell().createSell(
+        invoiceNo: invoiceNo,
+        transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss")
+            .format(DateTime.now()),
+        contactId: selectedCustomerId,
+        locId: selectedLocationId,
+        discountAmount: discountAmount,
+        discountType: discountType,
+        invoiceAmount: totalAmount,
+        changeReturn: 0.0,
+        pending: totalAmount,
+        saleStatus: 'draft',
+      );
       var sellId = await SellDatabase().storeSell(sellData);
-      for (var item in cartItems) { Map<String, dynamic> sellLine = { 'sell_id': sellId, 'product_id': item['product_id'], 'variation_id': item['id'], 'quantity': item['quantity'], 'unit_price': item['unit_price'], 'is_completed': 1 }; await SellDatabase().store(sellLine); }
-      if (await Helper().checkConnectivity()) { 
-        Sell().createApiSell(sellId: sellId); 
+      for (var item in cartItems) {
+        Map<String, dynamic> sellLine = {
+          'sell_id': sellId,
+          'product_id': item['product_id'],
+          'variation_id': item['id'],
+          'quantity': item['quantity'],
+          'unit_price': item['unit_price'],
+          'is_completed': 1,
+        };
+        await SellDatabase().store(sellLine);
+      }
+      if (await Helper().checkConnectivity()) {
+        Sell().createApiSell(sellId: sellId);
       }
       Helper().showNotification(context, "Sale saved as draft!");
       _resetCartState();
     } catch (e) {
-      Helper().showNotification(context, 'Draft save failed: $e', isError: true);
+      Helper().showNotification(
+        context,
+        'Draft save failed: $e',
+        isError: true,
+      );
     } finally {
       setState(() => isProcessingSale = false);
     }
@@ -2274,7 +2738,10 @@ class _ProductsState extends State<Products> {
         ),
         content: Text(msg),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("OK")),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("OK"),
+          ),
         ],
       ),
     );
@@ -2285,11 +2752,15 @@ class _ProductsState extends State<Products> {
       context: context,
       builder: (ctx) {
         String tempType = discountType;
-        TextEditingController amountController = TextEditingController(text: discountAmount.toString());
+        TextEditingController amountController = TextEditingController(
+          text: discountAmount.toString(),
+        );
         return StatefulBuilder(
           builder: (ctx2, setStateDialog) {
             return Dialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
               child: Container(
                 width: MediaQuery.of(context).size.width * 0.4,
                 padding: const EdgeInsets.all(16),
@@ -2297,31 +2768,267 @@ class _ProductsState extends State<Products> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [ const Text('Discount Reward', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500)), InkWell(onTap: () => Navigator.pop(ctx2), child: const Icon(Icons.close, size: 20, color: Colors.grey))]),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          'Discount Reward',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        InkWell(
+                          onTap: () => Navigator.pop(ctx2),
+                          child: const Icon(
+                            Icons.close,
+                            size: 20,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ],
+                    ),
                     const Divider(),
                     const SizedBox(height: 10),
-                    const Text('Edit Discount:', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const Text(
+                      'Edit Discount:',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
                     const SizedBox(height: 15),
-                    Row(children: [
-                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [ const Text('Discount Type:*', style: TextStyle(fontWeight: FontWeight.bold)), const SizedBox(height: 5), Container(padding: const EdgeInsets.symmetric(horizontal: 10), decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(4)), child: Row(children: [ const Icon(Icons.info_outline, size: 18, color: Colors.grey), const SizedBox(width: 10), Expanded(child: DropdownButtonHideUnderline(child: DropdownButton<String>(value: tempType, isExpanded: true, dropdownColor: Colors.white, items: const [ DropdownMenuItem(child: Text('Percentage'), value: 'percentage'), DropdownMenuItem(child: Text('Fixed'), value: 'fixed') ], onChanged: (val) { setStateDialog(() { tempType = val!; }); }))) ])) ])),
-                      const SizedBox(width: 15),
-                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [ const Text('Discount Amount:*', style: TextStyle(fontWeight: FontWeight.bold)), const SizedBox(height: 5), Container(height: 48, decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(4)), child: Row(children: [ const Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Icon(Icons.info_outline, size: 18, color: Colors.grey)), Expanded(child: TextField(controller: amountController, onTap: () { amountController.selection = TextSelection(baseOffset: 0, extentOffset: amountController.text.length); }, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(border: InputBorder.none, isDense: true))) ])) ]))
-                    ]),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Discount Type:*',
+                                style: TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                              const SizedBox(height: 5),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                ),
+                                decoration: BoxDecoration(
+                                  border: Border.all(
+                                    color: Colors.grey.shade300,
+                                  ),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(
+                                      Icons.info_outline,
+                                      size: 18,
+                                      color: Colors.grey,
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: DropdownButtonHideUnderline(
+                                        child: DropdownButton<String>(
+                                          value: tempType,
+                                          isExpanded: true,
+                                          dropdownColor: Colors.white,
+                                          items: const [
+                                            DropdownMenuItem(
+                                              child: Text('Percentage'),
+                                              value: 'percentage',
+                                            ),
+                                            DropdownMenuItem(
+                                              child: Text('Fixed'),
+                                              value: 'fixed',
+                                            ),
+                                          ],
+                                          onChanged: (val) {
+                                            setStateDialog(() {
+                                              tempType = val!;
+                                            });
+                                          },
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 15),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Discount Amount:*',
+                                style: TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                              const SizedBox(height: 5),
+                              Container(
+                                height: 48,
+                                decoration: BoxDecoration(
+                                  border: Border.all(
+                                    color: Colors.grey.shade300,
+                                  ),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Padding(
+                                      padding: EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                      ),
+                                      child: Icon(
+                                        Icons.info_outline,
+                                        size: 18,
+                                        color: Colors.grey,
+                                      ),
+                                    ),
+                                    Expanded(
+                                      child: TextField(
+                                        controller: amountController,
+                                        onTap: () {
+                                          amountController
+                                              .selection = TextSelection(
+                                            baseOffset: 0,
+                                            extentOffset:
+                                                amountController.text.length,
+                                          );
+                                        },
+                                        keyboardType:
+                                            const TextInputType.numberWithOptions(
+                                              decimal: true,
+                                            ),
+                                        decoration: const InputDecoration(
+                                          border: InputBorder.none,
+                                          isDense: true,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
                     const SizedBox(height: 25),
                     const Divider(),
-                    const Text('Reward:', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const Text(
+                      'Reward:',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
                     const SizedBox(height: 10),
-                    Row(children: [
-                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [ const Text('Redeemed:', style: TextStyle(fontWeight: FontWeight.bold)), const SizedBox(height: 5), Container(height: 40, decoration: BoxDecoration(color: Colors.grey.shade100, border: Border.all(color: Colors.grey.shade300)), child: const Row(children: [ Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Icon(Icons.card_giftcard, size: 18, color: Colors.grey)), VerticalDivider(width: 1) ])) ])),
-                      const SizedBox(width: 15),
-                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [ const Text('Available:', style: TextStyle(fontWeight: FontWeight.bold)), const SizedBox(height: 10), Text('Redeemed Amount: 0.00 $symbol', style: const TextStyle(color: Color(0xff2d348e), fontWeight: FontWeight.bold, fontSize: 13)) ]))
-                    ]),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Redeemed:',
+                                style: TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                              const SizedBox(height: 5),
+                              Container(
+                                height: 40,
+                                decoration: BoxDecoration(
+                                  color: Colors.grey.shade100,
+                                  border: Border.all(
+                                    color: Colors.grey.shade300,
+                                  ),
+                                ),
+                                child: const Row(
+                                  children: [
+                                    Padding(
+                                      padding: EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                      ),
+                                      child: Icon(
+                                        Icons.card_giftcard,
+                                        size: 18,
+                                        color: Colors.grey,
+                                      ),
+                                    ),
+                                    VerticalDivider(width: 1),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 15),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Available:',
+                                style: TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                              const SizedBox(height: 10),
+                              Text(
+                                'Redeemed Amount: 0.00 $symbol',
+                                style: const TextStyle(
+                                  color: Color(0xff2d348e),
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
                     const SizedBox(height: 30),
-                    Row(mainAxisAlignment: MainAxisAlignment.end, children: [
-                      ElevatedButton(onPressed: () { setState(() { discountType = tempType; discountAmount = double.tryParse(amountController.text) ?? 0.0; }); Navigator.pop(ctx2); }, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xff6200ee), padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))), child: const Text('Update', style: TextStyle(color: Colors.white))),
-                      const SizedBox(width: 10),
-                      ElevatedButton(onPressed: () => Navigator.pop(ctx2), style: ElevatedButton.styleFrom(backgroundColor: const Color(0xff2c3e50), padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))), child: const Text('Cancel', style: TextStyle(color: Colors.white)))
-                    ])
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        ElevatedButton(
+                          onPressed: () {
+                            setState(() {
+                              discountType = tempType;
+                              discountAmount =
+                                  double.tryParse(amountController.text) ?? 0.0;
+                            });
+                            Navigator.pop(ctx2);
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xff6200ee),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 24,
+                              vertical: 12,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                          ),
+                          child: const Text(
+                            'Update',
+                            style: TextStyle(color: Colors.white),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        ElevatedButton(
+                          onPressed: () => Navigator.pop(ctx2),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xff2c3e50),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 24,
+                              vertical: 12,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                          ),
+                          child: const Text(
+                            'Cancel',
+                            style: TextStyle(color: Colors.white),
+                          ),
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ),
@@ -2334,35 +3041,45 @@ class _ProductsState extends State<Products> {
 
   void _addToCartFromProduct(Map product) {
     try {
-      var effId = product['variation_id'] ?? product['product_id'] ?? product['id'];
+      var effId =
+          product['variation_id'] ?? product['product_id'] ?? product['id'];
       if (effId == null) {
         debugPrint("Error: Product missing ID");
         return;
       }
-      
+
       String effIdStr = effId.toString();
-      int existingIndex = cartItems.indexWhere((item) => (item['id']?.toString() ?? '') == effIdStr);
-      
+      int existingIndex = cartItems.indexWhere(
+        (item) => (item['id']?.toString() ?? '') == effIdStr,
+      );
+
       if (existingIndex >= 0) {
         setState(() {
-          double currentQty = double.tryParse(cartItems[existingIndex]['quantity'].toString()) ?? 0.0;
+          double currentQty =
+              double.tryParse(
+                cartItems[existingIndex]['quantity'].toString(),
+              ) ??
+              0.0;
           cartItems[existingIndex]['quantity'] = currentQty + 1;
         });
       } else {
         setState(() {
-          cartItems.add({ 
-            'id': effId, 
-            'product_id': product['product_id'], 
-            'display_name': product['display_name'] ?? product['name'] ?? 'Product', 
-            'image': product['product_image_url'], 
-            'unit_price': double.tryParse((product['unit_price'] ?? '0').toString()) ?? 0.0, 
-            'quantity': 1, 
-            'discount_amount': 0.0, 
-            'discount_type': 'fixed' 
+          cartItems.add({
+            'id': effId,
+            'product_id': product['product_id'],
+            'display_name':
+                product['display_name'] ?? product['name'] ?? 'Product',
+            'image': product['product_image_url'],
+            'unit_price':
+                double.tryParse((product['unit_price'] ?? '0').toString()) ??
+                0.0,
+            'quantity': 1,
+            'discount_amount': 0.0,
+            'discount_type': 'fixed',
           });
         });
       }
-      
+
       try {
         _updateCustomerDisplay();
       } catch (e) {
@@ -2376,23 +3093,54 @@ class _ProductsState extends State<Products> {
   void _handleShortcuts(KeyEvent event) async {
     if (event is! KeyDownEvent) return;
     bool isControlPressed = HardwareKeyboard.instance.isControlPressed;
-    if (isControlPressed && event.logicalKey == LogicalKeyboardKey.keyC) { _quickCheckout('cash'); }
-    else if (isControlPressed && event.logicalKey == LogicalKeyboardKey.keyB) { _quickCheckout('card'); }
-    else if (isControlPressed && event.logicalKey == LogicalKeyboardKey.keyM) { _goToCheckout(); }
-    else if (isControlPressed && event.logicalKey == LogicalKeyboardKey.keyD) { _saveAsDraft(); }
-    else if (isControlPressed && event.logicalKey == LogicalKeyboardKey.keyN) { Navigator.pushNamed(context, '/customer', arguments: _getCheckoutArgs()); }
-    else if (isControlPressed && event.logicalKey == LogicalKeyboardKey.keyS) { productSearchFocusNode.requestFocus(); }
-    else if (isControlPressed && event.logicalKey == LogicalKeyboardKey.keyL) { _printLastInvoice(); }
+    if (isControlPressed && event.logicalKey == LogicalKeyboardKey.keyC) {
+      _quickCheckout('cash');
+    } else if (isControlPressed &&
+        event.logicalKey == LogicalKeyboardKey.keyB) {
+      _quickCheckout('card');
+    } else if (isControlPressed &&
+        event.logicalKey == LogicalKeyboardKey.keyM) {
+      _goToCheckout();
+    } else if (isControlPressed &&
+        event.logicalKey == LogicalKeyboardKey.keyD) {
+      _saveAsDraft();
+    } else if (isControlPressed &&
+        event.logicalKey == LogicalKeyboardKey.keyN) {
+      Navigator.pushNamed(context, '/customer', arguments: _getCheckoutArgs());
+    } else if (isControlPressed &&
+        event.logicalKey == LogicalKeyboardKey.keyS) {
+      productSearchFocusNode.requestFocus();
+    } else if (isControlPressed &&
+        event.logicalKey == LogicalKeyboardKey.keyL) {
+      _printLastInvoice();
+    }
   }
 
   void _printLastInvoice() async {
     List sells = await SellDatabase().getSells();
-    if (sells.isNotEmpty) { Helper().printDocument(sells[0]['id'], sells[0]['tax_rate_id'], context, isManual: true); }
-    else { Helper().showNotification(context, "No invoice found", isError: true); }
+    if (sells.isNotEmpty) {
+      Helper().printDocument(
+        sells[0]['id'],
+        sells[0]['tax_rate_id'],
+        context,
+        isManual: true,
+      );
+    } else {
+      Helper().showNotification(context, "No invoice found", isError: true);
+    }
   }
 
   Map _getCheckoutArgs() {
-    return Helper().argument(locId: selectedLocationId, taxId: argument != null ? argument!['taxId'] : null, discountType: discountType, discountAmount: discountAmount, invoiceAmount: getCartTotal(), sellId: argument != null ? argument!['sellId'] : null, isQuotation: argument != null ? argument!['is_quotation'] : 0, customerId: selectedCustomerId);
+    return Helper().argument(
+      locId: selectedLocationId,
+      taxId: argument != null ? argument!['taxId'] : null,
+      discountType: discountType,
+      discountAmount: discountAmount,
+      invoiceAmount: getCartTotal(),
+      sellId: argument != null ? argument!['sellId'] : null,
+      isQuotation: argument != null ? argument!['is_quotation'] : 0,
+      customerId: selectedCustomerId,
+    );
   }
 
   void _resetCartState() {
@@ -2404,11 +3152,11 @@ class _ProductsState extends State<Products> {
       cartItems = [];
       cartCount = 0;
       activeSellId = null;
-      selectedCustomerId = 1; // Always reset to Walk-In Customer
+      selectedCustomerId = 0;
       selectedCustomerDue = 0.0;
       discountAmount = 0.0;
       discountType = 'percentage';
-      
+
       // Force Refresh Product List to show new stock levels
       products = [];
       offset = 0;
@@ -2423,22 +3171,25 @@ class _ProductsState extends State<Products> {
     if (isProcessingSale) return;
     setState(() => isProcessingSale = true);
     try {
-      String invoiceNo =
-          await Helper().generateRefNumber('sell', locationId: selectedLocationId);
+      String invoiceNo = await Helper().generateRefNumber(
+        'sell',
+        locationId: selectedLocationId,
+      );
       Map<String, dynamic> sellData = await Sell().createSell(
-          invoiceNo: invoiceNo,
-          transactionDate:
-              DateFormat("yyyy-MM-dd HH:mm:ss").format(DateTime.now()),
-          contactId: selectedCustomerId,
-          locId: selectedLocationId,
-          discountAmount: discountAmount,
-          discountType: discountType,
-          invoiceAmount: getCartTotal(),
-          changeReturn: 0.0,
-          pending: getCartTotal(),
-          saleStatus: 'draft',
-          isQuotation: 1,
-          sellId: activeSellId);
+        invoiceNo: invoiceNo,
+        transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss")
+            .format(DateTime.now()),
+        contactId: selectedCustomerId,
+        locId: selectedLocationId,
+        discountAmount: discountAmount,
+        discountType: discountType,
+        invoiceAmount: getCartTotal(),
+        changeReturn: 0.0,
+        pending: getCartTotal(),
+        saleStatus: 'draft',
+        isQuotation: 1,
+        sellId: activeSellId,
+      );
 
       int sellId;
       if (activeSellId != null) {
@@ -2459,7 +3210,7 @@ class _ProductsState extends State<Products> {
           'unit_price': item['unit_price'],
           'discount_amount': item['discount_amount'] ?? 0.0,
           'discount_type': item['discount_type'] ?? 'fixed',
-          'is_completed': 1
+          'is_completed': 1,
         };
         await SellDatabase().store(sellLine);
       }
@@ -2482,24 +3233,54 @@ class _ProductsState extends State<Products> {
     setState(() => isProcessingSale = true);
     try {
       double total = getCartTotal();
-      String invoiceNo = await Helper().generateRefNumber('sell', locationId: selectedLocationId);
-      Map<String, dynamic> sellData = await Sell().createSell(invoiceNo: invoiceNo, transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss").format(DateTime.now()), contactId: selectedCustomerId, locId: selectedLocationId, discountAmount: discountAmount, discountType: discountType, invoiceAmount: total, changeReturn: 0.0, pending: 0.0, saleStatus: 'final');
+      String invoiceNo = await Helper().generateRefNumber(
+        'sell',
+        locationId: selectedLocationId,
+      );
+      Map<String, dynamic> sellData = await Sell().createSell(
+        invoiceNo: invoiceNo,
+        transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss")
+            .format(DateTime.now()),
+        contactId: selectedCustomerId,
+        locId: selectedLocationId,
+        discountAmount: discountAmount,
+        discountType: discountType,
+        invoiceAmount: total,
+        changeReturn: 0.0,
+        pending: 0.0,
+        saleStatus: 'final',
+      );
       int sellId = await SellDatabase().storeSell(sellData);
-      for (var item in cartItems) { await Sell().addToCart(item, sellId); }
-      await SellDatabase().updateSellLine({'sell_id': sellId, 'is_completed': 1});
+      for (var item in cartItems) {
+        await Sell().addToCart(item, sellId);
+      }
+      await SellDatabase().updateSellLine({
+        'sell_id': sellId,
+        'is_completed': 1,
+      });
       int? accountId;
       try {
         List methods = await System().get('payment_method', selectedLocationId);
-        var selectedMethod = methods.firstWhere((m) => m['name'].toString().toLowerCase() == method.toLowerCase(), orElse: () => null);
-        if (selectedMethod != null && selectedMethod['account_id'] != null) { accountId = int.tryParse(selectedMethod['account_id'].toString()); }
+        var selectedMethod = methods.firstWhere(
+          (m) => m['name'].toString().toLowerCase() == method.toLowerCase(),
+          orElse: () => null,
+        );
+        if (selectedMethod != null && selectedMethod['account_id'] != null) {
+          accountId = int.tryParse(selectedMethod['account_id'].toString());
+        }
       } catch (_) {}
-      await Sell().makePayment([{ 'method': method, 'amount': total, 'note': '${method[0].toUpperCase()}${method.substring(1)} Quick Checkout', 'account_id': accountId }], sellId);
-      final printerService = PrinterService();
-      bool hasKitchen = printerService.printKitchenCopy;
-      await Helper().printDocument(sellId, 0, context, keepAlive: hasKitchen);
-      if (hasKitchen) { await Helper().printKitchenDocument(sellId, context); }
-      if (await Helper().checkConnectivity()) { 
-        Sell().createApiSell(sellId: sellId); 
+      await Sell().makePayment([
+        {
+          'method': method,
+          'amount': total,
+          'note':
+              '${method[0].toUpperCase()}${method.substring(1)} Quick Checkout',
+          'account_id': accountId,
+        },
+      ], sellId);
+      _printSaleInBackground(sellId);
+      if (await Helper().checkConnectivity()) {
+        Sell().createApiSell(sellId: sellId);
         // Send WhatsApp notification in background
         WhatsAppService().sendSaleNotification(sellId);
       }
@@ -2521,26 +3302,30 @@ class _ProductsState extends State<Products> {
     setState(() => isProcessingSale = true);
     try {
       // Use activeSellId if we've already created a draft in this session
-      int? sellId = activeSellId ?? (argument != null ? argument!['sellId'] : null);
-      
+      int? sellId =
+          activeSellId ?? (argument != null ? argument!['sellId'] : null);
+
       if (sellId == null) {
-        String invoiceNo = await Helper()
-            .generateRefNumber('sell', locationId: selectedLocationId);
+        String invoiceNo = await Helper().generateRefNumber(
+          'sell',
+          locationId: selectedLocationId,
+        );
         Map<String, dynamic> sellData = await Sell().createSell(
-            invoiceNo: invoiceNo,
-            transactionDate:
-                DateFormat("yyyy-MM-dd HH:mm:ss").format(DateTime.now()),
-            contactId: selectedCustomerId,
-            locId: selectedLocationId,
-            discountAmount: discountAmount,
-            discountType: discountType,
-            invoiceAmount: getCartTotal(),
-            changeReturn: 0.0,
-            pending: 0.0,
-            saleStatus: 'draft');
+          invoiceNo: invoiceNo,
+          transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss")
+              .format(DateTime.now()),
+          contactId: selectedCustomerId,
+          locId: selectedLocationId,
+          discountAmount: discountAmount,
+          discountType: discountType,
+          invoiceAmount: getCartTotal(),
+          changeReturn: 0.0,
+          pending: 0.0,
+          saleStatus: 'draft',
+        );
         sellId = await SellDatabase().storeSell(sellData);
         activeSellId = sellId; // REMEMBER THIS ID
-        
+
         for (var item in cartItems) {
           await Sell().addToCart(item, sellId);
         }
@@ -2549,29 +3334,35 @@ class _ProductsState extends State<Products> {
         // The items are already being synced to this sellId via onTapProduct/onTapCart
         // But we should ensure the final amount and customer match current state
         Map<String, dynamic> sellData = await Sell().createSell(
-            transactionDate:
-                DateFormat("yyyy-MM-dd HH:mm:ss").format(DateTime.now()),
-            contactId: selectedCustomerId,
-            locId: selectedLocationId,
-            discountAmount: discountAmount,
-            discountType: discountType,
-            invoiceAmount: getCartTotal(),
-            changeReturn: 0.0,
-            pending: 0.0,
-            saleStatus: 'draft',
-            sellId: sellId);
+          transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss")
+              .format(DateTime.now()),
+          contactId: selectedCustomerId,
+          locId: selectedLocationId,
+          discountAmount: discountAmount,
+          discountType: discountType,
+          invoiceAmount: getCartTotal(),
+          changeReturn: 0.0,
+          pending: 0.0,
+          saleStatus: 'draft',
+          sellId: sellId,
+        );
         await SellDatabase().updateSells(sellId, sellData);
       }
 
-      var result = await Navigator.of(context).push(MaterialPageRoute<bool>(
+      var result = await Navigator.of(context).push(
+        MaterialPageRoute<bool>(
           builder: (ctx) => CheckOut(
-              initialArgument: Helper().argument(
-                  invoiceAmount: getCartTotal(),
-                  customerId: selectedCustomerId,
-                  locId: selectedLocationId,
-                  sellId: sellId),
-              replaceRootOnComplete: false),
-          fullscreenDialog: true));
+            initialArgument: Helper().argument(
+              invoiceAmount: getCartTotal(),
+              customerId: selectedCustomerId,
+              locId: selectedLocationId,
+              sellId: sellId,
+            ),
+            replaceRootOnComplete: false,
+          ),
+          fullscreenDialog: true,
+        ),
+      );
       if (result == true) {
         _resetCartState();
       }
@@ -2584,8 +3375,12 @@ class _ProductsState extends State<Products> {
 
   void _showEditCartItemDialog(int index) {
     var item = cartItems[index];
-    TextEditingController priceController = TextEditingController(text: item['unit_price'].toString());
-    TextEditingController discountController = TextEditingController(text: item['discount_amount'].toString());
+    TextEditingController priceController = TextEditingController(
+      text: item['unit_price'].toString(),
+    );
+    TextEditingController discountController = TextEditingController(
+      text: item['discount_amount'].toString(),
+    );
     String currentDiscountType = item['discount_type'] ?? 'fixed';
     showDialog(
       context: context,
@@ -2594,18 +3389,71 @@ class _ProductsState extends State<Products> {
           builder: (context, setDialogState) {
             return AlertDialog(
               title: Text(item['display_name']),
-              content: Column(mainAxisSize: MainAxisSize.min, children: [
-                TextField(controller: priceController, decoration: const InputDecoration(labelText: 'Unit Price'), keyboardType: TextInputType.number),
-                const SizedBox(height: 10),
-                Row(children: [
-                  Expanded(child: TextField(controller: discountController, decoration: const InputDecoration(labelText: 'Discount'), keyboardType: TextInputType.number)),
-                  const SizedBox(width: 10),
-                  DropdownButton<String>(value: currentDiscountType, items: const [ DropdownMenuItem(value: 'fixed', child: Text('Fixed')), DropdownMenuItem(value: 'percentage', child: Text('Percentage')) ], onChanged: (val) { if (val != null) { setDialogState(() { currentDiscountType = val; }); } })
-                ])
-              ]),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: priceController,
+                    decoration: const InputDecoration(labelText: 'Unit Price'),
+                    keyboardType: TextInputType.number,
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: discountController,
+                          decoration: const InputDecoration(
+                            labelText: 'Discount',
+                          ),
+                          keyboardType: TextInputType.number,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      DropdownButton<String>(
+                        value: currentDiscountType,
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'fixed',
+                            child: Text('Fixed'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'percentage',
+                            child: Text('Percentage'),
+                          ),
+                        ],
+                        onChanged: (val) {
+                          if (val != null) {
+                            setDialogState(() {
+                              currentDiscountType = val;
+                            });
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+              ),
               actions: [
-                TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-                ElevatedButton(onPressed: () { setState(() { cartItems[index]['unit_price'] = double.tryParse(priceController.text) ?? item['unit_price']; cartItems[index]['discount_amount'] = double.tryParse(discountController.text) ?? 0.0; cartItems[index]['discount_type'] = currentDiscountType; }); _updateCustomerDisplay(); Navigator.pop(context); }, child: const Text('Update'))
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    setState(() {
+                      cartItems[index]['unit_price'] =
+                          double.tryParse(priceController.text) ??
+                          item['unit_price'];
+                      cartItems[index]['discount_amount'] =
+                          double.tryParse(discountController.text) ?? 0.0;
+                      cartItems[index]['discount_type'] = currentDiscountType;
+                    });
+                    _updateCustomerDisplay();
+                    Navigator.pop(context);
+                  },
+                  child: const Text('Update'),
+                ),
               ],
             );
           },
@@ -2615,59 +3463,187 @@ class _ProductsState extends State<Products> {
   }
 
   void _updateCustomerDisplay() {
-    final displayService = Provider.of<CustomerDisplayService>(context, listen: false);
-    displayService.updateDisplay(items: cartItems.map((item) => { 'name': item['display_name'], 'quantity': item['quantity'], 'price': item['unit_price'].toStringAsFixed(2) }).toList(), total: getCartTotal().toStringAsFixed(2), symbol: symbol);
+    final displayService = Provider.of<CustomerDisplayService>(
+      context,
+      listen: false,
+    );
+    displayService.updateDisplay(
+      items: cartItems
+          .map(
+            (item) => {
+              'name': item['display_name'],
+              'quantity': item['quantity'],
+              'price': item['unit_price'].toStringAsFixed(2),
+            },
+          )
+          .toList(),
+      total: getCartTotal().toStringAsFixed(2),
+      symbol: symbol,
+    );
   }
 
   int _getCartIndexForProduct(Map product) {
     var effId = product['variation_id'] ?? product['product_id'];
     String effIdStr = effId?.toString() ?? '';
-    return cartItems.indexWhere((item) => (item['id']?.toString() ?? '') == effIdStr);
+    return cartItems.indexWhere(
+      (item) => (item['id']?.toString() ?? '') == effIdStr,
+    );
   }
 
   void _showEditCartDialog(Map product) async {
     int idx = _getCartIndexForProduct(product);
     if (idx < 0) return;
-    TextEditingController qtyController = TextEditingController(text: (cartItems[idx]['quantity'] ?? 1).toString());
+    TextEditingController qtyController = TextEditingController(
+      text: (cartItems[idx]['quantity'] ?? 1).toString(),
+    );
     await showDialog(
       context: context,
       builder: (ctx) {
         return AlertDialog(
           title: Text(AppLocalizations.of(context).translate('edit_item')),
-          content: Column(mainAxisSize: MainAxisSize.min, children: [ Text(product['display_name'] ?? ''), const SizedBox(height: 12), TextField(controller: qtyController, onTap: () { qtyController.selection = TextSelection(baseOffset: 0, extentOffset: qtyController.text.length); }, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: InputDecoration(labelText: AppLocalizations.of(context).translate('quantity') ?? 'Quantity')) ]),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(product['display_name'] ?? ''),
+              const SizedBox(height: 12),
+              TextField(
+                controller: qtyController,
+                onTap: () {
+                  qtyController.selection = TextSelection(
+                    baseOffset: 0,
+                    extentOffset: qtyController.text.length,
+                  );
+                },
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: InputDecoration(
+                  labelText:
+                      AppLocalizations.of(context).translate('quantity') ??
+                      'Quantity',
+                ),
+              ),
+            ],
+          ),
           actions: [
-            TextButton(onPressed: () async { 
-              Navigator.pop(ctx); 
-              setState(() { cartItems.removeAt(idx); }); 
-              _updateCustomerDisplay(); 
-              try { 
-                var effId = product['variation_id'] ?? product['product_id']; 
-                if (argument != null && argument!['sellId'] != null) { 
-                  await SellDatabase().delete(effId, product['product_id'], sellId: argument!['sellId']); 
-                } else { 
-                  await SellDatabase().delete(effId, product['product_id']); 
-                } 
-              } catch (_) {} 
-            }, child: Text(AppLocalizations.of(context).translate('delete') ?? 'Delete', style: const TextStyle(color: Colors.red))),
-            TextButton(onPressed: () { Navigator.pop(ctx); }, child: Text(AppLocalizations.of(context).translate('cancel') ?? 'Cancel')),
-            ElevatedButton(onPressed: () async { double q = Helper().validateInput(qtyController.text); if (q <= 0) { Helper().showNotification(context, AppLocalizations.of(context).translate('enter_valid_quantity') ?? 'Enter valid quantity', isError: true); return; } setState(() { cartItems[idx]['quantity'] = (q % 1 == 0) ? q.toInt() : q; }); _updateCustomerDisplay(); try { var effId = product['variation_id'] ?? product['product_id']; List rows = await SellDatabase().checkSellLine(effId, sellId: argument != null ? argument!['sellId'] : null); if (rows.isNotEmpty) { var dbId = rows[0]['id']; await SellDatabase().update(dbId, {'quantity': q}); } } catch (_) {} Navigator.pop(ctx); }, child: Text(AppLocalizations.of(context).translate('update') ?? 'Update'))
+            TextButton(
+              onPressed: () async {
+                Navigator.pop(ctx);
+                setState(() {
+                  cartItems.removeAt(idx);
+                });
+                _updateCustomerDisplay();
+                try {
+                  var effId = product['variation_id'] ?? product['product_id'];
+                  if (argument != null && argument!['sellId'] != null) {
+                    await SellDatabase().delete(
+                      effId,
+                      product['product_id'],
+                      sellId: argument!['sellId'],
+                    );
+                  } else {
+                    await SellDatabase().delete(effId, product['product_id']);
+                  }
+                } catch (_) {}
+              },
+              child: Text(
+                AppLocalizations.of(context).translate('delete') ?? 'Delete',
+                style: const TextStyle(color: Colors.red),
+              ),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+              },
+              child: Text(
+                AppLocalizations.of(context).translate('cancel') ?? 'Cancel',
+              ),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                double q = Helper().validateInput(qtyController.text);
+                if (q <= 0) {
+                  Helper().showNotification(
+                    context,
+                    AppLocalizations.of(context)
+                            .translate('enter_valid_quantity') ??
+                        'Enter valid quantity',
+                    isError: true,
+                  );
+                  return;
+                }
+                setState(() {
+                  cartItems[idx]['quantity'] = (q % 1 == 0) ? q.toInt() : q;
+                });
+                _updateCustomerDisplay();
+                try {
+                  var effId = product['variation_id'] ?? product['product_id'];
+                  List rows = await SellDatabase().checkSellLine(
+                    effId,
+                    sellId: argument != null ? argument!['sellId'] : null,
+                  );
+                  if (rows.isNotEmpty) {
+                    var dbId = rows[0]['id'];
+                    await SellDatabase().update(dbId, {'quantity': q});
+                  }
+                } catch (_) {}
+                Navigator.pop(ctx);
+              },
+              child: Text(
+                AppLocalizations.of(context).translate('update') ?? 'Update',
+              ),
+            ),
           ],
         );
       },
     );
   }
 
-  setLocationMap() async {
+  Future<void> setLocationMap() async {
     var value = await System().get('location');
-    List<Map<dynamic, dynamic>> tmp = [ {'id': 0, 'name': 'All'} ];
-    for (var element in value) { if (element['is_active'].toString() == '1') { tmp.add({ 'id': element['id'], 'name': element['name'], 'selling_price_group_id': element['selling_price_group_id'] }); } }
-    setState(() { locationListMap = tmp; });
+    List<Map<dynamic, dynamic>> tmp = [
+      {'id': 0, 'name': 'All'},
+    ];
+    for (var element in value) {
+      if (element['is_active'].toString() == '1') {
+        tmp.add(Map<dynamic, dynamic>.from(element));
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      locationListMap = tmp;
+      if (selectedLocationId == 0 && tmp.length == 2) {
+        selectedLocationId = int.tryParse(tmp[1]['id'].toString()) ?? 0;
+      }
+    });
     await priceGroupList();
+    if (activeSellId == null) {
+      await _selectDefaultCustomerForLocation(selectedLocationId);
+    }
   }
 
-  setDefaultLocation(defaultLocation) {
-    if (defaultLocation != 0) { setState(() { selectedLocationId = defaultLocation; }); }
-    else if (locationListMap.length == 2) { setState(() { selectedLocationId = int.tryParse(locationListMap[1]['id'].toString()) ?? 0; }); }
+  void setDefaultLocation(int defaultLocation) {
+    final availableLocations = locationListMap.where((location) {
+      final id = int.tryParse(location['id'].toString());
+      return id != null && id > 0;
+    });
+    final selectedLocationIsAvailable = availableLocations.any(
+      (location) => int.tryParse(location['id'].toString()) == defaultLocation,
+    );
+    final firstLocationId = availableLocations.isEmpty
+        ? 0
+        : int.tryParse(availableLocations.first['id'].toString()) ?? 0;
+    final locationToSelect = selectedLocationIsAvailable
+        ? defaultLocation
+        : firstLocationId;
+
+    if (selectedLocationId != locationToSelect && mounted) {
+      setState(() {
+        selectedLocationId = locationToSelect;
+      });
+    } else {
+      selectedLocationId = locationToSelect;
+    }
   }
 
   Widget locations() {
@@ -2678,8 +3654,8 @@ class _ProductsState extends State<Products> {
         value: locationListMap.any((item) => item['id'] == selectedLocationId)
             ? selectedLocationId
             : (locationListMap.isNotEmpty
-                ? (int.tryParse(locationListMap[0]['id'].toString()) ?? 0)
-                : 0),
+                  ? (int.tryParse(locationListMap[0]['id'].toString()) ?? 0)
+                  : 0),
         items: locationListMap.map<DropdownMenuItem<int>>((Map value) {
           return DropdownMenuItem<int>(
             value: value['id'],
@@ -2695,25 +3671,117 @@ class _ProductsState extends State<Products> {
             ),
           );
         }).toList(),
-        onTap: () { if (locationListMap.length <= 2) { canChangeLocation = false; } },
+        onTap: () {
+          if (locationListMap.length <= 2) {
+            canChangeLocation = false;
+          }
+        },
         onChanged: (int? newValue) async {
           if (canChangeLocation) {
-            if (selectedLocationId == newValue) { changeLocation = false; }
-            else if (selectedLocationId != 0) { await _showCartResetDialogForLocation(); await priceGroupList(); }
-            else { changeLocation = true; await priceGroupList(); }
-            setState(() { if (changeLocation) { Sell().resetCart(); cartItems = []; selectedLocationId = newValue!; brandId = 0; categoryId = 0; searchController.clear(); inStock = false; cartCount = 0; products = []; offset = 0; productList(); _updateCustomerDisplay(); } });
-          } else { _showSafeToast(AppLocalizations.of(context).translate('cannot_change_location')); }
+            if (selectedLocationId == newValue) {
+              changeLocation = false;
+            } else if (selectedLocationId != 0) {
+              await _showCartResetDialogForLocation();
+              await priceGroupList();
+            } else {
+              changeLocation = true;
+              await priceGroupList();
+            }
+            setState(() {
+              if (changeLocation) {
+                Sell().resetCart();
+                cartItems = [];
+                selectedLocationId = newValue!;
+                selectedCustomerId = 0;
+                brandId = 0;
+                categoryId = 0;
+                searchController.clear();
+                inStock = false;
+                cartCount = 0;
+                products = [];
+                offset = 0;
+                productList();
+                _updateCustomerDisplay();
+              }
+            });
+            if (changeLocation) {
+              await _selectDefaultCustomerForLocation(selectedLocationId);
+            }
+          } else {
+            _showSafeToast(
+              AppLocalizations.of(context).translate('cannot_change_location'),
+            );
+          }
         },
       ),
     );
   }
 
   Future<void> _showCartResetDialogForLocation() async {
-    await showDialog(context: context, builder: (BuildContext context) { return AlertDialog(title: Text(AppLocalizations.of(context).translate('change_location')), content: Text(AppLocalizations.of(context).translate('all_items_in_cart_will_be_remove')), actions: [ TextButton(onPressed: () { changeLocation = false; Navigator.of(context).pop(); }, child: Text(AppLocalizations.of(context).translate('no'))), TextButton(onPressed: () { changeLocation = true; Navigator.of(context).pop(); }, child: Text(AppLocalizations.of(context).translate('yes'))) ]); });
+    await showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text(
+            AppLocalizations.of(context).translate('change_location'),
+          ),
+          content: Text(
+            AppLocalizations.of(context)
+                .translate('all_items_in_cart_will_be_remove'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                changeLocation = false;
+                Navigator.of(context).pop();
+              },
+              child: Text(AppLocalizations.of(context).translate('no')),
+            ),
+            TextButton(
+              onPressed: () {
+                changeLocation = true;
+                Navigator.of(context).pop();
+              },
+              child: Text(AppLocalizations.of(context).translate('yes')),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> _showCartResetDialogForPriceGroup() async {
-    await showDialog(context: context, builder: (BuildContext context) { return AlertDialog(title: Text(AppLocalizations.of(context).translate('change_selling_price_group')), content: Text(AppLocalizations.of(context).translate('all_items_in_cart_will_be_remove')), actions: [ TextButton(onPressed: () { changePriceGroup = false; Navigator.of(context).pop(); }, child: Text(AppLocalizations.of(context).translate('no'))), TextButton(onPressed: () { changePriceGroup = true; Navigator.of(context).pop(); }, child: Text(AppLocalizations.of(context).translate('yes'))) ]); });
+    await showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text(
+            AppLocalizations.of(context)
+                .translate('change_selling_price_group'),
+          ),
+          content: Text(
+            AppLocalizations.of(context)
+                .translate('all_items_in_cart_will_be_remove'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                changePriceGroup = false;
+                Navigator.of(context).pop();
+              },
+              child: Text(AppLocalizations.of(context).translate('no')),
+            ),
+            TextButton(
+              onPressed: () {
+                changePriceGroup = true;
+                Navigator.of(context).pop();
+              },
+              child: Text(AppLocalizations.of(context).translate('yes')),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   void _showAddCustomerDialog() {
@@ -2762,12 +3830,16 @@ class _ProductsState extends State<Products> {
                           color: const Color(0xff732a13).withValues(alpha: 0.1),
                           shape: BoxShape.circle,
                         ),
-                        child: const Icon(Icons.person_add_rounded,
-                            color: Color(0xff732a13), size: 32),
+                        child: const Icon(
+                          Icons.person_add_rounded,
+                          color: Color(0xff732a13),
+                          size: 32,
+                        ),
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        AppLocalizations.of(context).translate('add_customer') ??
+                        AppLocalizations.of(context)
+                                .translate('add_customer') ??
                             "Add New Customer",
                         style: const TextStyle(
                           fontSize: 22,
@@ -2778,18 +3850,25 @@ class _ProductsState extends State<Products> {
                       const SizedBox(height: 24),
                       _build3DTextField(
                         controller: nameController,
-                        label: AppLocalizations.of(context).translate('name') ?? "Name",
+                        label:
+                            AppLocalizations.of(context).translate('name') ??
+                            "Name",
                         icon: Icons.person_outline_rounded,
                         autofocus: true,
                       ),
                       const SizedBox(height: 20),
                       _build3DTextField(
                         controller: mobileController,
-                        label: AppLocalizations.of(context).translate('mobile') ?? "Mobile Number",
+                        label:
+                            AppLocalizations.of(context).translate('mobile') ??
+                            "Mobile Number",
                         icon: Icons.phone_android_rounded,
                         keyboardType: TextInputType.phone,
                         suffixIcon: IconButton(
-                          icon: const Icon(Icons.search_rounded, color: Colors.blueAccent),
+                          icon: const Icon(
+                            Icons.search_rounded,
+                            color: Colors.blueAccent,
+                          ),
                           onPressed: () async {
                             if (mobileController.text.length < 5) {
                               _showSafeToast("Enter at least 5 digits");
@@ -2799,7 +3878,11 @@ class _ProductsState extends State<Products> {
                             dynamic existing;
                             try {
                               existing = customers.firstWhere(
-                                (c) => c['mobile']?.toString().contains(mobileController.text) ?? false,
+                                (c) =>
+                                    c['mobile']?.toString().contains(
+                                      mobileController.text,
+                                    ) ??
+                                    false,
                               );
                             } catch (_) {
                               existing = null;
@@ -2808,21 +3891,29 @@ class _ProductsState extends State<Products> {
                             if (existing != null) {
                               if (mounted) {
                                 setState(() {
-                                  selectedCustomerId = int.tryParse(existing['id'].toString()) ?? 0;
+                                  selectedCustomerId =
+                                      int.tryParse(existing['id'].toString()) ??
+                                      0;
                                 });
                                 await _updateCustomerDue();
                                 Navigator.pop(ctx);
-                                _showSafeToast("Customer already exists locally: ${existing['name']}");
+                                _showSafeToast(
+                                  "Customer already exists locally: ${existing['name']}",
+                                );
                               }
                               return;
                             }
 
                             // 2. Check on server
                             _showSafeToast("Checking on server...");
-                            var serverSearch = await CustomerApi().search(mobileController.text);
-                            if (serverSearch != null && serverSearch['data'] != null && serverSearch['data'].isNotEmpty) {
+                            var serverSearch = await CustomerApi().search(
+                              mobileController.text,
+                            );
+                            if (serverSearch != null &&
+                                serverSearch['data'] != null &&
+                                serverSearch['data'].isNotEmpty) {
                               var serverData = serverSearch['data'][0];
-                              
+
                               // Sync to local DB
                               await Contact().insertContact(
                                 Contact().contactModel(serverData),
@@ -2831,11 +3922,17 @@ class _ProductsState extends State<Products> {
 
                               if (mounted) {
                                 setState(() {
-                                  selectedCustomerId = int.tryParse(serverData['id'].toString()) ?? 0;
+                                  selectedCustomerId =
+                                      int.tryParse(
+                                        serverData['id'].toString(),
+                                      ) ??
+                                      0;
                                 });
                                 await _updateCustomerDue();
                                 Navigator.pop(ctx);
-                                _showSafeToast("Customer already exists on server: ${serverData['name']}");
+                                _showSafeToast(
+                                  "Customer already exists on server: ${serverData['name']}",
+                                );
                               }
                               return;
                             }
@@ -2845,21 +3942,30 @@ class _ProductsState extends State<Products> {
                             try {
                               var waContact = await WhatsAppService()
                                   .getContactDetails(mobileController.text);
-                              
-                              if (waContact != null && waContact['name'] != null && waContact['name'].toString().isNotEmpty) {
+
+                              if (waContact != null &&
+                                  waContact['name'] != null &&
+                                  waContact['name'].toString().isNotEmpty) {
                                 setDialogState(() {
                                   nameController.text = waContact['name'];
                                   if (waContact['number'] != null) {
-                                    mobileController.text = waContact['number'].toString();
+                                    mobileController.text = waContact['number']
+                                        .toString();
                                   }
                                 });
-                                _showSafeToast("Found on WhatsApp! Name: ${waContact['name']}");
+                                _showSafeToast(
+                                  "Found on WhatsApp! Name: ${waContact['name']}",
+                                );
                               } else {
-                                _showSafeToast("Contact not found on WhatsApp server.");
+                                _showSafeToast(
+                                  "Contact not found on WhatsApp server.",
+                                );
                               }
                             } catch (e) {
                               debugPrint("WhatsApp Search Error in UI: $e");
-                              _showSafeToast("WhatsApp server error or timeout.");
+                              _showSafeToast(
+                                "WhatsApp server error or timeout.",
+                              );
                             }
                           },
                         ),
@@ -2869,16 +3975,24 @@ class _ProductsState extends State<Products> {
                         children: [
                           Expanded(
                             child: _build3DButton(
-                              text: AppLocalizations.of(context).translate('cancel') ?? "Cancel",
+                              text:
+                                  AppLocalizations.of(context)
+                                      .translate('cancel') ??
+                                  "Cancel",
                               color: Colors.grey.shade200,
                               textColor: Colors.grey.shade700,
-                              onPressed: isSaving ? null : () => Navigator.pop(ctx),
+                              onPressed: isSaving
+                                  ? null
+                                  : () => Navigator.pop(ctx),
                             ),
                           ),
                           const SizedBox(width: 16),
                           Expanded(
                             child: _build3DButton(
-                              text: AppLocalizations.of(context).translate('save') ?? "Save",
+                              text:
+                                  AppLocalizations.of(context)
+                                      .translate('save') ??
+                                  "Save",
                               color: const Color(0xff732a13),
                               textColor: Colors.white,
                               isLoading: isSaving,
@@ -2886,11 +4000,16 @@ class _ProductsState extends State<Products> {
                                   ? null
                                   : () async {
                                       if (formKey.currentState!.validate()) {
-                                        String finalName = nameController.text.trim();
-                                        String mobileNum = mobileController.text.trim();
+                                        String finalName = nameController.text
+                                            .trim();
+                                        String mobileNum = mobileController.text
+                                            .trim();
 
-                                        if (finalName.isEmpty && mobileNum.isEmpty) {
-                                          _showSafeToast("Name or Mobile is required");
+                                        if (finalName.isEmpty &&
+                                            mobileNum.isEmpty) {
+                                          _showSafeToast(
+                                            "Name or Mobile is required",
+                                          );
                                           return;
                                         }
 
@@ -2901,12 +4020,25 @@ class _ProductsState extends State<Products> {
                                         setDialogState(() => isSaving = true);
                                         try {
                                           // 1. If name is blank, try to fetch from WhatsApp automatically
-                                          if (finalName.isEmpty && mobileNum.isNotEmpty) {
-                                            _showSafeToast("Fetching name from WhatsApp...");
-                                            var waContact = await WhatsAppService().getContactDetails(mobileNum);
-                                            if (waContact != null && waContact['name'] != null && waContact['name'].toString().isNotEmpty) {
+                                          if (finalName.isEmpty &&
+                                              mobileNum.isNotEmpty) {
+                                            _showSafeToast(
+                                              "Fetching name from WhatsApp...",
+                                            );
+                                            var waContact =
+                                                await WhatsAppService()
+                                                    .getContactDetails(
+                                                      mobileNum,
+                                                    );
+                                            if (waContact != null &&
+                                                waContact['name'] != null &&
+                                                waContact['name']
+                                                    .toString()
+                                                    .isNotEmpty) {
                                               finalName = waContact['name'];
-                                              _showSafeToast("Found: $finalName");
+                                              _showSafeToast(
+                                                "Found: $finalName",
+                                              );
                                             }
                                           }
 
@@ -2921,41 +4053,82 @@ class _ProductsState extends State<Products> {
                                             'mobile': mobileNum,
                                           };
 
-                                          final response = await CustomerApi().add(newCustomer);
-                                          if (response != null && (response['success'] == true || response['data'] != null)) {
-                                            var responseData = response['data'] ?? response;
+                                          final response = await CustomerApi()
+                                              .add(newCustomer);
+                                          if (response != null &&
+                                              (response['success'] == true ||
+                                                  response['data'] != null)) {
+                                            var responseData =
+                                                response['data'] ?? response;
 
                                             // Sync to local DB
                                             await Contact().insertContact(
-                                              Contact().contactModel(responseData),
+                                              Contact().contactModel(
+                                                responseData,
+                                              ),
                                             );
-                                            
+
                                             // Refresh list and select the new customer
                                             await _loadCustomers();
                                             if (mounted) {
                                               setState(() {
-                                                selectedCustomerId = int.tryParse(responseData['id'].toString()) ?? 0;
+                                                selectedCustomerId =
+                                                    int.tryParse(
+                                                      responseData['id']
+                                                          .toString(),
+                                                    ) ??
+                                                    0;
                                               });
                                               await _updateCustomerDue();
                                               Navigator.pop(ctx);
-                                              _showSafeToast("Customer Added Successfully");
+                                              _showSafeToast(
+                                                "Customer Added Successfully",
+                                              );
                                             }
                                           } else {
-                                            String msg = response?['message'] ?? "Server failed to save contact";
-                                            
+                                            String msg =
+                                                response?['message'] ??
+                                                "Server failed to save contact";
+
                                             // Check if it's a duplicate entry error
-                                            if (msg.toLowerCase().contains("already") || msg.toLowerCase().contains("duplicate") || msg.toLowerCase().contains("taken")) {
-                                              _showSafeToast("Number already exists. Fetching details...");
-                                              
+                                            if (msg.toLowerCase().contains(
+                                                  "already",
+                                                ) ||
+                                                msg.toLowerCase().contains(
+                                                  "duplicate",
+                                                ) ||
+                                                msg.toLowerCase().contains(
+                                                  "taken",
+                                                )) {
+                                              _showSafeToast(
+                                                "Number already exists. Fetching details...",
+                                              );
+
                                               // Try to find the existing customer on server
-                                              var searchRes = await CustomerApi().search(mobileNum);
-                                              if (searchRes != null && searchRes['data'] != null && searchRes['data'].isNotEmpty) {
-                                                var existingData = searchRes['data'][0];
-                                                await Contact().insertContact(Contact().contactModel(existingData));
+                                              var searchRes =
+                                                  await CustomerApi().search(
+                                                    mobileNum,
+                                                  );
+                                              if (searchRes != null &&
+                                                  searchRes['data'] != null &&
+                                                  searchRes['data']
+                                                      .isNotEmpty) {
+                                                var existingData =
+                                                    searchRes['data'][0];
+                                                await Contact().insertContact(
+                                                  Contact().contactModel(
+                                                    existingData,
+                                                  ),
+                                                );
                                                 await _loadCustomers();
                                                 if (mounted) {
                                                   setState(() {
-                                                    selectedCustomerId = int.tryParse(existingData['id'].toString()) ?? 0;
+                                                    selectedCustomerId =
+                                                        int.tryParse(
+                                                          existingData['id']
+                                                              .toString(),
+                                                        ) ??
+                                                        0;
                                                   });
                                                   await _updateCustomerDue();
                                                   Navigator.pop(ctx);
@@ -2969,7 +4142,9 @@ class _ProductsState extends State<Products> {
                                         } catch (e) {
                                           _showSafeToast("Error: $e");
                                         } finally {
-                                          setDialogState(() => isSaving = false);
+                                          setDialogState(
+                                            () => isSaving = false,
+                                          );
                                         }
                                       }
                                     },
@@ -3023,7 +4198,10 @@ class _ProductsState extends State<Products> {
           ),
           filled: true,
           fillColor: Colors.grey.shade50,
-          contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
+          contentPadding: const EdgeInsets.symmetric(
+            vertical: 16,
+            horizontal: 16,
+          ),
         ),
       ),
     );
@@ -3053,17 +4231,31 @@ class _ProductsState extends State<Products> {
           backgroundColor: color,
           foregroundColor: textColor,
           padding: const EdgeInsets.symmetric(vertical: 16),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
           elevation: 0,
         ),
         onPressed: onPressed,
         child: isLoading
-            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-            : Text(text, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white,
+                ),
+              )
+            : Text(
+                text,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
+              ),
       ),
     );
   }
-
 }
 
 class _ProductGridWidget extends StatefulWidget {
@@ -3071,7 +4263,15 @@ class _ProductGridWidget extends StatefulWidget {
   final String? qtyAvailable;
   final double? price;
   final Color? cardColor;
-  const _ProductGridWidget({super.key, required this.name, required this.image, required this.qtyAvailable, required this.price, required this.symbol, this.cardColor});
+  const _ProductGridWidget({
+    super.key,
+    required this.name,
+    required this.image,
+    required this.qtyAvailable,
+    required this.price,
+    required this.symbol,
+    this.cardColor,
+  });
   @override
   _ProductGridWidgetState createState() => _ProductGridWidgetState();
 }
@@ -3084,13 +4284,92 @@ class _ProductGridWidgetState extends State<_ProductGridWidget> {
     String key = Generator.randomString(10);
     themeData = Theme.of(context);
     return Card(
-      elevation: 4, shadowColor: Colors.black26, clipBehavior: Clip.antiAlias, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), color: widget.cardColor ?? Colors.white,
-      child: Stack(children: [
-        Positioned.fill(child: Hero(tag: key, child: CachedNetworkImage(fit: BoxFit.cover, errorWidget: (context, url, error) => Image.asset('assets/images/default_product.png'), placeholder: (context, url) => Image.asset('assets/images/default_product.png'), imageUrl: widget.image ?? ''))),
-        if (widget.qtyAvailable != '-') Positioned(top: 8, left: 8, child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: themeData.colorScheme.primary.withOpacity(0.9), borderRadius: BorderRadius.circular(6)), child: Text('Qty: ${widget.qtyAvailable}', style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)))),
-        Positioned(top: 8, right: 8, child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: Colors.green.withOpacity(0.9), borderRadius: BorderRadius.circular(6)), child: Text("${widget.symbol}${Helper().formatCurrency(widget.price)}", style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)))),
-        Positioned(bottom: 0, left: 0, right: 0, child: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.black.withOpacity(0.5), borderRadius: const BorderRadius.only(bottomLeft: Radius.circular(12), bottomRight: Radius.circular(12))), child: Text(widget.name!, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13))))
-      ]),
+      elevation: 4,
+      shadowColor: Colors.black26,
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      color: widget.cardColor ?? Colors.white,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: Hero(
+              tag: key,
+              child: CachedNetworkImage(
+                fit: BoxFit.cover,
+                errorWidget: (context, url, error) =>
+                    Image.asset('assets/images/default_product.png'),
+                placeholder: (context, url) =>
+                    Image.asset('assets/images/default_product.png'),
+                imageUrl: widget.image ?? '',
+              ),
+            ),
+          ),
+          if (widget.qtyAvailable != '-')
+            Positioned(
+              top: 8,
+              left: 8,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: themeData.colorScheme.primary.withOpacity(0.9),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  'Qty: ${widget.qtyAvailable}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          Positioned(
+            top: 8,
+            right: 8,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.green.withOpacity(0.9),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                "${widget.symbol}${Helper().formatCurrency(widget.price)}",
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.5),
+                borderRadius: const BorderRadius.only(
+                  bottomLeft: Radius.circular(12),
+                  bottomRight: Radius.circular(12),
+                ),
+              ),
+              child: Text(
+                widget.name!,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -3100,7 +4379,15 @@ class _ProductListWidget extends StatefulWidget {
   final String? qtyAvailable;
   final double? price;
   final Color? cardColor;
-  const _ProductListWidget({super.key, required this.name, required this.image, required this.qtyAvailable, required this.price, required this.symbol, this.cardColor});
+  const _ProductListWidget({
+    super.key,
+    required this.name,
+    required this.image,
+    required this.qtyAvailable,
+    required this.price,
+    required this.symbol,
+    this.cardColor,
+  });
   @override
   _ProductListWidgetState createState() => _ProductListWidgetState();
 }
@@ -3113,8 +4400,89 @@ class _ProductListWidgetState extends State<_ProductListWidget> {
     MySize().init(context);
     themeData = Theme.of(context);
     return Material(
-      color: widget.cardColor ?? Colors.white, borderRadius: const BorderRadius.all(Radius.circular(16)), elevation: 5, shadowColor: Colors.black.withOpacity(0.1),
-      child: Padding(padding: EdgeInsets.all(MySize.size8!), child: ListTile(leading: ClipRRect(borderRadius: BorderRadius.circular(MySize.size30!), child: CachedNetworkImage(errorWidget: (context, url, error) => Image.asset('assets/images/default_product.png'), placeholder: (context, url) => Image.asset('assets/images/default_product.png'), imageUrl: widget.image ?? '')), title: Text(widget.name!, style: AppTheme.getTextStyle(themeData.textTheme.titleSmall, fontWeight: 500, letterSpacing: 0)), trailing: Row(mainAxisSize: MainAxisSize.min, children: [ Column(mainAxisAlignment: MainAxisAlignment.spaceAround, children: <Widget>[ Text(Helper().formatCurrency(widget.price) + widget.symbol!, style: AppTheme.getTextStyle(themeData.textTheme.bodyMedium, fontWeight: 700, letterSpacing: 0)), Container(width: MySize.size80, decoration: BoxDecoration(color: themeData.colorScheme.primary, borderRadius: BorderRadius.all(Radius.circular(MySize.size4!))), padding: EdgeInsets.only(left: MySize.size6!, right: MySize.size8!, top: MySize.size2!, bottom: MySize.getScaledSizeHeight(3.5)), child: Row(children: <Widget>[ Icon(Symbols.inventory, color: themeData.colorScheme.onPrimary, size: MySize.size12), Container(margin: EdgeInsets.only(left: MySize.size4!), child: (widget.qtyAvailable != '-') ? Text(Helper().formatQuantity(widget.qtyAvailable), style: AppTheme.getTextStyle(themeData.textTheme.bodySmall, fontSize: 11, color: themeData.colorScheme.onPrimary, fontWeight: 600)) : const Text('-')) ])) ]) ]))),
+      color: widget.cardColor ?? Colors.white,
+      borderRadius: const BorderRadius.all(Radius.circular(16)),
+      elevation: 5,
+      shadowColor: Colors.black.withOpacity(0.1),
+      child: Padding(
+        padding: EdgeInsets.all(MySize.size8!),
+        child: ListTile(
+          leading: ClipRRect(
+            borderRadius: BorderRadius.circular(MySize.size30!),
+            child: CachedNetworkImage(
+              errorWidget: (context, url, error) =>
+                  Image.asset('assets/images/default_product.png'),
+              placeholder: (context, url) =>
+                  Image.asset('assets/images/default_product.png'),
+              imageUrl: widget.image ?? '',
+            ),
+          ),
+          title: Text(
+            widget.name!,
+            style: AppTheme.getTextStyle(
+              themeData.textTheme.titleSmall,
+              fontWeight: 500,
+              letterSpacing: 0,
+            ),
+          ),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Column(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: <Widget>[
+                  Text(
+                    Helper().formatCurrency(widget.price) + widget.symbol!,
+                    style: AppTheme.getTextStyle(
+                      themeData.textTheme.bodyMedium,
+                      fontWeight: 700,
+                      letterSpacing: 0,
+                    ),
+                  ),
+                  Container(
+                    width: MySize.size80,
+                    decoration: BoxDecoration(
+                      color: themeData.colorScheme.primary,
+                      borderRadius: BorderRadius.all(
+                        Radius.circular(MySize.size4!),
+                      ),
+                    ),
+                    padding: EdgeInsets.only(
+                      left: MySize.size6!,
+                      right: MySize.size8!,
+                      top: MySize.size2!,
+                      bottom: MySize.getScaledSizeHeight(3.5),
+                    ),
+                    child: Row(
+                      children: <Widget>[
+                        Icon(
+                          Symbols.inventory,
+                          color: themeData.colorScheme.onPrimary,
+                          size: MySize.size12,
+                        ),
+                        Container(
+                          margin: EdgeInsets.only(left: MySize.size4!),
+                          child: (widget.qtyAvailable != '-')
+                              ? Text(
+                                  Helper().formatQuantity(widget.qtyAvailable),
+                                  style: AppTheme.getTextStyle(
+                                    themeData.textTheme.bodySmall,
+                                    fontSize: 11,
+                                    color: themeData.colorScheme.onPrimary,
+                                    fontWeight: 600,
+                                  ),
+                                )
+                              : const Text('-'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

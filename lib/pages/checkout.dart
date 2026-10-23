@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -35,9 +36,8 @@ class CheckOutState extends State<CheckOut> {
   int? sellId;
   double totalPaying = 0.0;
   String symbol = '',
-      transactionDate = DateFormat(
-        'yyyy-MM-dd HH:mm:ss',
-      ).format(DateTime.now());
+      transactionDate = DateFormat('yyyy-MM-dd HH:mm:ss')
+          .format(DateTime.now());
   Map? argument;
   List<Map> payments = [],
       paymentAccounts = [
@@ -194,9 +194,10 @@ class CheckOutState extends State<CheckOut> {
     });
 
     // Manually add ARB if not already in the list from the server
-    bool hasArb = paymentMethods.any((m) => 
-      m['name'].toString().toUpperCase().contains('ARB') || 
-      m['name'].toString().toUpperCase().contains('RAJHI')
+    bool hasArb = paymentMethods.any(
+      (m) =>
+          m['name'].toString().toUpperCase().contains('ARB') ||
+          m['name'].toString().toUpperCase().contains('RAJHI'),
     );
 
     if (!hasArb) {
@@ -208,8 +209,8 @@ class CheckOutState extends State<CheckOut> {
     }
 
     // Add NFC Customer Card if not present
-    bool hasNfc = paymentMethods.any((m) =>
-      m['name'].toString().toUpperCase().contains('NFC')
+    bool hasNfc = paymentMethods.any(
+      (m) => m['name'].toString().toUpperCase().contains('NFC'),
     );
 
     if (!hasNfc) {
@@ -329,10 +330,14 @@ class CheckOutState extends State<CheckOut> {
                     ),
                   ),
                 ),
-                LayoutBuilder(builder: (context, constraints) => _buildFooter(constraints.maxWidth)),
+                LayoutBuilder(
+                  builder: (context, constraints) =>
+                      _buildFooter(constraints.maxWidth),
+                ),
               ],
             ),
-            if (isLoading) Helper().loadingIndicator(context, subTitle: 'PROCESSING...'),
+            if (isLoading)
+              Helper().loadingIndicator(context, subTitle: 'PROCESSING...'),
           ],
         ),
       ),
@@ -396,8 +401,10 @@ class CheckOutState extends State<CheckOut> {
             ElevatedButton(
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF2C3E50),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 16,
+                ),
               ),
               onPressed: () => Navigator.pop(context),
               child: const Text("Close", style: TextStyle(color: Colors.white)),
@@ -406,12 +413,16 @@ class CheckOutState extends State<CheckOut> {
             ElevatedButton(
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF5011E1),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 16,
+                ),
               ),
-              onPressed: isLoading ? null : () {
-                if (!saleCreated) onSubmit();
-              },
+              onPressed: isLoading
+                  ? null
+                  : () {
+                      if (!saleCreated) onSubmit();
+                    },
               child: const Text(
                 "Finalize Payment",
                 textAlign: TextAlign.center,
@@ -427,12 +438,16 @@ class CheckOutState extends State<CheckOut> {
               child: ElevatedButton(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF2C3E50),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 16,
+                  ),
                 ),
                 onPressed: () => Navigator.pop(context),
-                child:
-                    const Text("Close", style: TextStyle(color: Colors.white)),
+                child: const Text(
+                  "Close",
+                  style: TextStyle(color: Colors.white),
+                ),
               ),
             ),
             const SizedBox(width: 12),
@@ -441,12 +456,16 @@ class CheckOutState extends State<CheckOut> {
               child: ElevatedButton(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF5011E1),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 16,
+                  ),
                 ),
-                onPressed: isLoading ? null : () {
-                  if (!saleCreated) onSubmit();
-                },
+                onPressed: isLoading
+                    ? null
+                    : () {
+                        if (!saleCreated) onSubmit();
+                      },
                 child: const Text(
                   "Finalize Payment",
                   textAlign: TextAlign.center,
@@ -515,14 +534,12 @@ class CheckOutState extends State<CheckOut> {
                           decoration: _inputDecoration(Symbols.paid),
                           onTap: () {
                             if (payments[index]['controller'].text.isNotEmpty) {
-                              payments[index]['controller'].selection =
-                                  TextSelection(
-                                    baseOffset: 0,
-                                    extentOffset:
-                                        payments[index]['controller']
-                                            .text
-                                            .length,
-                                  );
+                              payments[index]['controller']
+                                  .selection = TextSelection(
+                                baseOffset: 0,
+                                extentOffset:
+                                    payments[index]['controller'].text.length,
+                              );
                             }
                           },
                           onChanged: (val) {
@@ -801,7 +818,9 @@ class CheckOutState extends State<CheckOut> {
     );
   }
 
-  Future<Map<String, dynamic>?> _scanAndVerifyNfcCard(double requiredAmount) async {
+  Future<Map<String, dynamic>?> _scanAndVerifyNfcCard(
+    double requiredAmount,
+  ) async {
     bool isAvailable = await NfcService().isNfcAvailable();
     Completer<Map<String, dynamic>?> completer = Completer();
     TextEditingController manualCardController = TextEditingController();
@@ -837,17 +856,36 @@ class CheckOutState extends State<CheckOut> {
               if (nfcCustomer == null) {
                 if (mounted) {
                   Navigator.pop(dialogCtx);
-                  _showError("No customer account found for NFC Card ($cardUid).");
+                  _showError(
+                    "No customer account found for NFC Card ($cardUid).",
+                  );
                   if (!completer.isCompleted) completer.complete(null);
                 }
                 return;
               }
 
-              double advanceBalance = double.tryParse((nfcCustomer['advance_balance'] ?? nfcCustomer['balance'] ?? 0.0).toString()) ?? 0.0;
-              double creditLimit = double.tryParse((nfcCustomer['credit_limit'] ?? 0.0).toString()) ?? 0.0;
-              double totalDue = double.tryParse((nfcCustomer['total_due'] ?? 0.0).toString()) ?? 0.0;
+              double advanceBalance =
+                  double.tryParse(
+                    (nfcCustomer['advance_balance'] ??
+                            nfcCustomer['balance'] ??
+                            0.0)
+                        .toString(),
+                  ) ??
+                  0.0;
+              double creditLimit =
+                  double.tryParse(
+                    (nfcCustomer['credit_limit'] ?? 0.0).toString(),
+                  ) ??
+                  0.0;
+              double totalDue =
+                  double.tryParse(
+                    (nfcCustomer['total_due'] ?? 0.0).toString(),
+                  ) ??
+                  0.0;
 
-              double availableCredit = creditLimit > 0 ? (creditLimit - totalDue) : 0.0;
+              double availableCredit = creditLimit > 0
+                  ? (creditLimit - totalDue)
+                  : 0.0;
               if (availableCredit < 0) availableCredit = 0.0;
               double totalPurchasingPower = advanceBalance + availableCredit;
 
@@ -888,12 +926,17 @@ class CheckOutState extends State<CheckOut> {
             }
 
             return AlertDialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
               title: Row(
                 children: [
                   Icon(Symbols.nfc, color: themeData.colorScheme.primary),
                   const SizedBox(width: 8),
-                  const Text("NFC Customer Card", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  const Text(
+                    "NFC Customer Card",
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
                 ],
               ),
               content: SingleChildScrollView(
@@ -908,7 +951,11 @@ class CheckOutState extends State<CheckOut> {
                           color: themeData.colorScheme.primary.withAlpha(20),
                           shape: BoxShape.circle,
                         ),
-                        child: Icon(Symbols.contactless, size: 40, color: themeData.colorScheme.primary),
+                        child: Icon(
+                          Symbols.contactless,
+                          size: 40,
+                          color: themeData.colorScheme.primary,
+                        ),
                       ),
                       const SizedBox(height: 12),
                       Text(
@@ -921,10 +968,16 @@ class CheckOutState extends State<CheckOut> {
                         children: [
                           const Expanded(child: Divider()),
                           Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8.0,
+                            ),
                             child: Text(
                               "OR",
-                              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey[500]),
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.grey[500],
+                              ),
                             ),
                           ),
                           const Expanded(child: Divider()),
@@ -936,7 +989,11 @@ class CheckOutState extends State<CheckOut> {
                       alignment: Alignment.centerLeft,
                       child: Text(
                         "Enter Card ID / UID manually:",
-                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey[800]),
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.grey[800],
+                        ),
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -945,8 +1002,13 @@ class CheckOutState extends State<CheckOut> {
                       decoration: InputDecoration(
                         hintText: "e.g. E2003410",
                         prefixIcon: const Icon(Symbols.credit_card, size: 20),
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
                       ),
                       onSubmitted: (val) {
                         String manualUid = val.trim();
@@ -971,7 +1033,9 @@ class CheckOutState extends State<CheckOut> {
                   onPressed: () {
                     String manualUid = manualCardController.text.trim();
                     if (manualUid.isEmpty) {
-                      _showError("Please enter a valid Card ID or tap NFC card");
+                      _showError(
+                        "Please enter a valid Card ID or tap NFC card",
+                      );
                       return;
                     }
                     verifyAndComplete(manualUid);
@@ -997,7 +1061,9 @@ class CheckOutState extends State<CheckOut> {
       }
     }
 
-    if (nfcPaidAmount > 0 && argument!['customerId'] != null && argument!['customerId'] != 1) {
+    if (nfcPaidAmount > 0 &&
+        argument!['customerId'] != null &&
+        argument!['customerId'] != 1) {
       int custId = argument!['customerId'];
       try {
         final db = await DbProvider().database;
@@ -1013,7 +1079,9 @@ class CheckOutState extends State<CheckOut> {
       if (await Helper().checkConnectivity()) {
         try {
           var details = await CustomerApi().getContactDetails(custId);
-          if (details != null && details['data'] != null && details['data'].isNotEmpty) {
+          if (details != null &&
+              details['data'] != null &&
+              details['data'].isNotEmpty) {
             Map<String, dynamic> c = Contact().contactModel(details['data'][0]);
             await Contact().insertContact(c);
           }
@@ -1026,10 +1094,11 @@ class CheckOutState extends State<CheckOut> {
     if (isLoading) return;
 
     // --- ARB / Al Rajhi Payment Check ---
-    bool needsDigitalPayment = payments.any((p) => 
-      p['method'].toString().toUpperCase().contains('ARB') || 
-      p['method'].toString().toUpperCase().contains('RAJHI') ||
-      p['method'].toString().toLowerCase() == 'online'
+    bool needsDigitalPayment = payments.any(
+      (p) =>
+          p['method'].toString().toUpperCase().contains('ARB') ||
+          p['method'].toString().toUpperCase().contains('RAJHI') ||
+          p['method'].toString().toLowerCase() == 'online',
     );
 
     if (needsDigitalPayment) {
@@ -1037,11 +1106,11 @@ class CheckOutState extends State<CheckOut> {
         _showError("Internet connection required for ARB Payment.");
         return;
       }
-      
+
       String trackId = "TRK-${DateTime.now().millisecondsSinceEpoch}";
       double digitalAmount = 0;
       for (var p in payments) {
-        if (p['method'].toString().toUpperCase().contains('ARB') || 
+        if (p['method'].toString().toUpperCase().contains('ARB') ||
             p['method'].toString().toUpperCase().contains('RAJHI') ||
             p['method'].toString().toLowerCase() == 'online') {
           digitalAmount += (double.tryParse(p['amount'].toString()) ?? 0.0);
@@ -1050,7 +1119,7 @@ class CheckOutState extends State<CheckOut> {
 
       if (digitalAmount > 0) {
         setState(() => isLoading = true);
-        
+
         final String successUrl = "https://payment-callback.success";
         final String errorUrl = "https://payment-callback.error";
 
@@ -1065,7 +1134,9 @@ class CheckOutState extends State<CheckOut> {
 
         if (paymentId != null) {
           if (paymentId == "ERROR_MISSING_CREDS") {
-            _showError("ARB Credentials are missing. Please configure them in your Profile.");
+            _showError(
+              "ARB Credentials are missing. Please configure them in your Profile.",
+            );
             return;
           }
 
@@ -1074,10 +1145,18 @@ class CheckOutState extends State<CheckOut> {
             context: context,
             builder: (ctx) => AlertDialog(
               title: Text("Payment in Progress"),
-              content: Text("Please complete the payment in your browser and click 'I have Paid' below."),
+              content: Text(
+                "Please complete the payment in your browser and click 'I have Paid' below.",
+              ),
               actions: [
-                TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text("Cancel")),
-                TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text("I have Paid")),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: Text("Cancel"),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: Text("I have Paid"),
+                ),
               ],
             ),
           );
@@ -1095,8 +1174,8 @@ class CheckOutState extends State<CheckOut> {
     // --- End ARB Check ---
 
     // --- NFC Customer Card Payment Check ---
-    bool usesNfc = payments.any((p) =>
-      p['method'].toString().toUpperCase().contains('NFC')
+    bool usesNfc = payments.any(
+      (p) => p['method'].toString().toUpperCase().contains('NFC'),
     );
 
     if (usesNfc) {
@@ -1116,7 +1195,9 @@ class CheckOutState extends State<CheckOut> {
         argument!['customerId'] = nfcCustomer['id'];
 
         // Bind card_number, card_type, and card_holder_name to payment lines
-        String cardUid = (nfcCustomer['custom_field1'] ?? nfcCustomer['nfc_card_id'] ?? '').toString();
+        String cardUid =
+            (nfcCustomer['custom_field1'] ?? nfcCustomer['nfc_card_id'] ?? '')
+                .toString();
         for (var p in payments) {
           if (p['method'].toString().toUpperCase().contains('NFC')) {
             p['card_number'] = cardUid;
@@ -1174,7 +1255,10 @@ class CheckOutState extends State<CheckOut> {
 
     try {
       String type = (argument!['is_quotation'] == 1) ? 'draft' : 'sell';
-      String invoiceNo = await Helper().generateRefNumber(type, locationId: argument!['locationId']);
+      String invoiceNo = await Helper().generateRefNumber(
+        type,
+        locationId: argument!['locationId'],
+      );
 
       Map<String, dynamic> sell = await Sell().createSell(
         invoiceNo: invoiceNo,
@@ -1236,28 +1320,29 @@ class CheckOutState extends State<CheckOut> {
         // Direct communicate to server: wait for API if connected
         if (await Helper().checkConnectivity()) {
           Sell().createApiSell(sellId: sellId, force: true);
-          
+
           // Send specific "Payment Received" WhatsApp notification for due payments
           double totalPaidThisSession = 0;
           List<String> newMethods = [];
           for (var p in payments) {
-            if (p['id'] == null) { // Only count NEW payments added now
-               double amt = (double.tryParse(p['amount'].toString()) ?? 0.0);
-               if (amt > 0) {
-                 totalPaidThisSession += amt;
-                 String m = p['method'] ?? 'Cash';
-                 if (!newMethods.contains(m)) newMethods.add(m);
-               }
+            if (p['id'] == null) {
+              // Only count NEW payments added now
+              double amt = (double.tryParse(p['amount'].toString()) ?? 0.0);
+              if (amt > 0) {
+                totalPaidThisSession += amt;
+                String m = p['method'] ?? 'Cash';
+                if (!newMethods.contains(m)) newMethods.add(m);
+              }
             }
           }
           if (totalPaidThisSession > 0) {
             WhatsAppService().sendPaymentNotification(
-              sellId: sellId, 
+              sellId: sellId,
               paidAmount: totalPaidThisSession,
               paymentMethod: newMethods.join(', '),
             );
           }
-          
+
           // Always send the main Sale/Invoice notification (Unless it is a Draft)
           if (type != 'draft') {
             WhatsAppService().sendSaleNotification(sellId);
@@ -1327,37 +1412,36 @@ class CheckOutState extends State<CheckOut> {
     }
   }
 
-  printOption(sellId) async {
+  void printOption(sellId) {
     final printerService = PrinterService();
-
-    // 1. Start printing Customer Invoice
-    // Using keepAlive if kitchen copy is needed to avoid reconnecting
     bool hasKitchen = printerService.printKitchenCopy;
-    await Helper().printDocument(
-      sellId,
-      argument!['taxId'],
-      context,
-      keepAlive: hasKitchen,
-    );
-
-    // 2. Print Kitchen Order only if enabled
-    if (hasKitchen) {
-      await Helper().printKitchenDocument(sellId, context);
-    }
-
-    // Redirect to home/layout after starting prints
-    Timer(const Duration(milliseconds: 500), () async {
-      if (widget.replaceRootOnComplete == false) {
-        if (mounted) Navigator.pop(context, true);
-        return;
+    unawaited(() async {
+      try {
+        await Helper().printDocument(
+          sellId,
+          argument!['taxId'],
+          context,
+          keepAlive: hasKitchen,
+        );
+        if (hasKitchen) {
+          await Helper().printKitchenDocument(sellId, context);
+        }
+      } catch (e, stackTrace) {
+        debugPrint('Background receipt printing failed: $e\n$stackTrace');
       }
-      Navigator.pushNamedAndRemoveUntil(
-        context,
-        '/layout',
-        ModalRoute.withName('/home'),
-        arguments: {'initialIndex': 1},
-      );
-    });
+    }());
+
+    if (!mounted) return;
+    if (widget.replaceRootOnComplete == false) {
+      Navigator.pop(context, true);
+      return;
+    }
+    Navigator.pushNamedAndRemoveUntil(
+      context,
+      '/layout',
+      ModalRoute.withName('/home'),
+      arguments: {'initialIndex': 1},
+    );
   }
 
   Future<bool?> _showPaymentConfirmationDialog(String gatewayName) {
@@ -1365,10 +1449,18 @@ class CheckOutState extends State<CheckOut> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text("$gatewayName in Progress"),
-        content: Text("Please complete the payment in your browser/app and click 'I have Paid' below."),
+        content: Text(
+          "Please complete the payment in your browser/app and click 'I have Paid' below.",
+        ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text("Cancel")),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text("I have Paid")),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text("Cancel"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text("I have Paid"),
+          ),
         ],
       ),
     );

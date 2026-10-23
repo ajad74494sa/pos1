@@ -1,6 +1,6 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:krpos/apis/contact.dart';
 import 'package:krpos/helpers/AppTheme.dart';
 import 'package:krpos/helpers/SizeConfig.dart';
 import 'package:krpos/helpers/otherHelpers.dart';
@@ -9,8 +9,6 @@ import 'package:krpos/models/sell.dart';
 import 'package:krpos/models/sellDatabase.dart';
 import 'package:krpos/models/system.dart';
 import 'package:krpos/models/variations.dart';
-import 'package:krpos/locale/MyLocalizations.dart';
-import 'package:krpos/models/paymentDatabase.dart';
 
 class CreateOrderPage extends StatefulWidget {
   const CreateOrderPage({super.key});
@@ -22,19 +20,19 @@ class CreateOrderPage extends StatefulWidget {
 class _CreateOrderPageState extends State<CreateOrderPage> {
   final searchController = TextEditingController();
   final _scrollController = ScrollController();
-  
+
   List products = [];
   List cartItems = [];
   List contacts = [];
   List locationListMap = [];
-  
+
   int selectedLocationId = 0;
-  int selectedContactId = 1; // Default walk-in
+  int? selectedContactId;
   int offset = 0;
   bool isLoading = false;
   bool isProcessing = false;
   String symbol = '';
-  
+
   double discountAmount = 0.0;
   String discountType = 'percentage';
 
@@ -48,7 +46,8 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
   }
 
   void _scrollListener() {
-    if (_scrollController.position.pixels == _scrollController.position.maxScrollExtent) {
+    if (_scrollController.position.pixels ==
+        _scrollController.position.maxScrollExtent) {
       if (!isLoading) {
         productList();
       }
@@ -62,8 +61,9 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
       _loadContacts(),
       Helper().getFormattedBusinessDetails().then((v) => symbol = v['symbol']),
     ]);
+    await _selectDefaultCustomerForLocation(selectedLocationId);
     await productList();
-    setState(() => isLoading = false);
+    if (mounted) setState(() => isLoading = false);
   }
 
   Future<void> _loadLocations() async {
@@ -74,7 +74,42 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
   }
 
   Future<void> _loadContacts() async {
+    if (await Helper().checkConnectivity()) {
+      await CustomerApi().get();
+    }
     contacts = await Contact().get();
+  }
+
+  Future<void> _selectDefaultCustomerForLocation(int locationId) async {
+    final location = locationListMap.cast<Map>().firstWhere(
+      (location) => int.tryParse(location['id'].toString()) == locationId,
+      orElse: () => <String, dynamic>{},
+    );
+    final defaultCustomerId = int.tryParse(
+      location['default_customer_id']?.toString() ?? '',
+    );
+    final defaultCustomer = defaultCustomerId == null
+        ? null
+        : contacts.cast<Map>().where((contact) {
+            return int.tryParse(contact['id'].toString()) == defaultCustomerId;
+          }).firstOrNull;
+    final walkInCustomer = contacts.cast<Map>().where((contact) {
+      final name = (contact['name'] ?? '').toString().toLowerCase().replaceAll(
+        RegExp(r'[^a-z0-9]'),
+        '',
+      );
+      final contactCode = (contact['contact_id'] ?? '')
+          .toString()
+          .trim()
+          .toUpperCase();
+      return name == 'walkincustomer' || contactCode == 'CO0001';
+    }).firstOrNull;
+    if (selectedLocationId == locationId) {
+      final customer = defaultCustomer ?? walkInCustomer;
+      selectedContactId = customer == null
+          ? null
+          : int.tryParse(customer['id'].toString());
+    }
   }
 
   Future<void> productList() async {
@@ -85,7 +120,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
       offset: offset,
       inStock: true,
     );
-    
+
     if (results.isNotEmpty) {
       setState(() {
         products.addAll(results);
@@ -97,7 +132,9 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
 
   void addToCart(Map product) {
     setState(() {
-      int index = cartItems.indexWhere((item) => item['variation_id'] == product['variation_id']);
+      int index = cartItems.indexWhere(
+        (item) => item['variation_id'] == product['variation_id'],
+      );
       if (index >= 0) {
         cartItems[index]['quantity']++;
       } else {
@@ -135,14 +172,37 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
     }
   }
 
+  bool get hasValidCustomerSelection =>
+      selectedContactId != null &&
+      selectedContactId! > 0 &&
+      contacts.any(
+        (contact) =>
+            int.tryParse(contact['id'].toString()) == selectedContactId,
+      );
+
+  bool _requireCustomerSelection() {
+    if (hasValidCustomerSelection) return true;
+    Helper().showNotification(
+      context,
+      'No valid default customer is configured for this branch. Select a customer.',
+      isError: true,
+    );
+    return false;
+  }
+
   Future<void> submitDraft() async {
     if (cartItems.isEmpty) return;
+    if (!_requireCustomerSelection()) return;
     setState(() => isProcessing = true);
     try {
-      String invoiceNo = await Helper().generateRefNumber('sell', locationId: selectedLocationId);
+      String invoiceNo = await Helper().generateRefNumber(
+        'sell',
+        locationId: selectedLocationId,
+      );
       Map<String, dynamic> sellData = await Sell().createSell(
         invoiceNo: invoiceNo,
-        transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss").format(DateTime.now()),
+        transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss")
+            .format(DateTime.now()),
         contactId: selectedContactId,
         locId: selectedLocationId,
         discountAmount: discountAmount,
@@ -164,11 +224,11 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
           'is_completed': 1,
         });
       }
-      
+
       if (await Helper().checkConnectivity()) {
         await Sell().createApiSell(sellId: sellId);
       }
-      
+
       Helper().showNotification(context, "Order saved as draft");
       _clearCart();
     } catch (e) {
@@ -179,12 +239,17 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
 
   Future<void> submitOrder(List payments) async {
     if (cartItems.isEmpty) return;
+    if (!_requireCustomerSelection()) return;
     setState(() => isProcessing = true);
     try {
-      String invoiceNo = await Helper().generateRefNumber('sell', locationId: selectedLocationId);
+      String invoiceNo = await Helper().generateRefNumber(
+        'sell',
+        locationId: selectedLocationId,
+      );
       Map<String, dynamic> sellData = await Sell().createSell(
         invoiceNo: invoiceNo,
-        transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss").format(DateTime.now()),
+        transactionDate: DateFormat("yyyy-MM-dd HH:mm:ss")
+            .format(DateTime.now()),
         contactId: selectedContactId,
         locId: selectedLocationId,
         discountAmount: discountAmount,
@@ -207,7 +272,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
       }
 
       await Sell().makePayment(payments, sellId);
-      
+
       if (await Helper().checkConnectivity()) {
         await Sell().createApiSell(sellId: sellId);
       }
@@ -274,9 +339,14 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
         children: [
           DropdownButton<int>(
             isExpanded: true,
-            value: locationListMap.any((l) => int.parse(l['id'].toString()) == selectedLocationId)
+            value:
+                locationListMap.any(
+                  (l) => int.parse(l['id'].toString()) == selectedLocationId,
+                )
                 ? selectedLocationId
-                : (locationListMap.isNotEmpty ? int.parse(locationListMap[0]['id'].toString()) : 0),
+                : (locationListMap.isNotEmpty
+                      ? int.parse(locationListMap[0]['id'].toString())
+                      : 0),
             items: locationListMap.map<DropdownMenuItem<int>>((location) {
               return DropdownMenuItem<int>(
                 value: int.parse(location['id'].toString()),
@@ -286,11 +356,46 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
             onChanged: (value) {
               setState(() {
                 selectedLocationId = value ?? 0;
+                selectedContactId = null;
                 products = [];
                 offset = 0;
-                productList();
               });
+              _selectDefaultCustomerForLocation(selectedLocationId).then((_) {
+                if (mounted) setState(() {});
+              });
+              productList();
             },
+          ),
+          SizedBox(height: MySize.size12!),
+          DropdownButtonFormField<int>(
+            isExpanded: true,
+            key: ValueKey('$selectedLocationId-$selectedContactId'),
+            initialValue: hasValidCustomerSelection ? selectedContactId : null,
+            decoration: const InputDecoration(
+              labelText: 'Customer',
+              border: OutlineInputBorder(),
+            ),
+            hint: Text(
+              contacts.isEmpty ? 'No customers available' : 'Select customer',
+            ),
+            items: [
+              ...contacts
+                  .where((contact) {
+                    final id = int.tryParse(contact['id'].toString());
+                    return id != null && id != 0;
+                  })
+                  .map<DropdownMenuItem<int>>((contact) {
+                    return DropdownMenuItem<int>(
+                      value: int.parse(contact['id'].toString()),
+                      child: Text(
+                        (contact['name'] ?? 'Unnamed customer').toString(),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    );
+                  }),
+            ],
+            onChanged: (value) =>
+                setState(() => selectedContactId = value ?? 0),
           ),
           SizedBox(height: MySize.size12!),
           TextField(
@@ -298,7 +403,9 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
             decoration: InputDecoration(
               hintText: 'Search products...',
               prefixIcon: const Icon(Icons.search),
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
             ),
             onSubmitted: (_) {
               setState(() {
@@ -340,7 +447,10 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                     width: double.infinity,
                     color: Colors.grey[200],
                     child: p['product_image_url'] != null
-                        ? Image.network(p['product_image_url'], fit: BoxFit.cover)
+                        ? Image.network(
+                            p['product_image_url'],
+                            fit: BoxFit.cover,
+                          )
                         : const Icon(Icons.image, size: 40),
                   ),
                 ),
@@ -349,8 +459,15 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(p['display_name'], maxLines: 1, overflow: TextOverflow.ellipsis),
-                      Text('$symbol${p['sell_price_inc_tax']}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                      Text(
+                        p['display_name'],
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      Text(
+                        '$symbol${p['sell_price_inc_tax']}',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
                     ],
                   ),
                 ),
@@ -374,9 +491,14 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                   final it = cartItems[index];
                   return ListTile(
                     title: Text(it['display_name']),
-                    subtitle: Text('Qty: ${it['quantity']} x ${it['unit_price']}'),
+                    subtitle: Text(
+                      'Qty: ${it['quantity']} x ${it['unit_price']}',
+                    ),
                     trailing: IconButton(
-                      icon: const Icon(Icons.remove_circle_outline, color: Colors.red),
+                      icon: const Icon(
+                        Icons.remove_circle_outline,
+                        color: Colors.red,
+                      ),
                       onPressed: () => removeFromCart(index),
                     ),
                   );
@@ -391,8 +513,20 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text('Total:', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                      Text('$symbol${getCartTotal().toStringAsFixed(2)}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      const Text(
+                        'Total:',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text(
+                        '$symbol${getCartTotal().toStringAsFixed(2)}',
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 16),
@@ -407,8 +541,19 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: ElevatedButton(
-                          onPressed: isProcessing ? null : () => submitOrder([{'method': 'cash', 'amount': getCartTotal(), 'note': ''}]),
-                          style: ElevatedButton.styleFrom(backgroundColor: const Color(0xff732a13), foregroundColor: Colors.white),
+                          onPressed: isProcessing
+                              ? null
+                              : () => submitOrder([
+                                  {
+                                    'method': 'cash',
+                                    'amount': getCartTotal(),
+                                    'note': '',
+                                  },
+                                ]),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xff732a13),
+                            foregroundColor: Colors.white,
+                          ),
                           child: const Text('Finalize'),
                         ),
                       ),
@@ -419,7 +564,8 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
             ),
           ],
         ),
-        if (isProcessing) Helper().loadingIndicator(context, subTitle: 'PROCESSING...'),
+        if (isProcessing)
+          Helper().loadingIndicator(context, subTitle: 'PROCESSING...'),
       ],
     );
   }
@@ -429,12 +575,21 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Colors.white,
-        boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 4, offset: const Offset(0, -2))],
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black12,
+            blurRadius: 4,
+            offset: const Offset(0, -2),
+          ),
+        ],
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text('Items: ${cartItems.length}', style: const TextStyle(fontWeight: FontWeight.bold)),
+          Text(
+            'Items: ${cartItems.length}',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
           ElevatedButton(
             onPressed: () {
               showModalBottomSheet(

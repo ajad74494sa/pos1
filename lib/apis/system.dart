@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -19,6 +20,7 @@ class SystemApi {
       Tax().get(),
       Payment().get(),
     ]);
+    unawaited(Helper().preloadBusinessLogo());
 
     // Priority 2: Large datasets (Can run in background)
     // We don't await these to finish the login faster
@@ -44,10 +46,12 @@ class Brand extends Api {
 
   Future<List> get() async {
     try {
-      String url =this.baseUrl + this.apiUrl + "/brand";
+      String url = this.baseUrl + this.apiUrl + "/brand";
       var token = await System().getToken();
-      var response =
-          await http.get(Uri.parse(url), headers: this.getHeader('$token'));
+      var response = await http.get(
+        Uri.parse(url),
+        headers: this.getHeader('$token'),
+      );
       brands = jsonDecode(response.body);
       var brandList = brands['data'];
       await System().insert('brand', jsonEncode(brandList));
@@ -65,14 +69,16 @@ class Category extends Api {
     try {
       String url = this.baseUrl + this.apiUrl + "/taxonomy?type=product";
       var token = await System().getToken();
-      var response =
-      await http.get(Uri.parse(url), headers: this.getHeader('$token'));
+      var response = await http.get(
+        Uri.parse(url),
+        headers: this.getHeader('$token'),
+      );
       taxonomy = jsonDecode(response.body);
       var categoryList = taxonomy['data'];
-      
+
       List<Map<String, dynamic>> batchData = [];
       batchData.add({'key': 'taxonomy', 'value': jsonEncode(categoryList)});
-      
+
       taxonomy['data'].forEach((element) {
         if (element['sub_categories'].isNotEmpty) {
           element['sub_categories'].forEach((value) {
@@ -99,8 +105,10 @@ class Payment extends Api {
     try {
       String url = this.baseUrl + this.apiUrl + "/payment-methods";
       var token = await System().getToken();
-      var response =
-          await http.get(Uri.parse(url), headers: this.getHeader('$token'));
+      var response = await http.get(
+        Uri.parse(url),
+        headers: this.getHeader('$token'),
+      );
       payment = jsonDecode(response.body);
       List paymentList = [];
       payment.forEach((key, value) {
@@ -119,8 +127,10 @@ class Permissions extends Api {
     try {
       String url = this.baseUrl + this.apiUrl + "/user/loggedin";
       var token = await System().getToken();
-      var response =
-          await http.get(Uri.parse(url), headers: this.getHeader(token));
+      var response = await http.get(
+        Uri.parse(url),
+        headers: this.getHeader(token),
+      );
       var userDetails = jsonDecode(response.body);
       Map userDetailsMap = userDetails['data'];
       if (userDetailsMap.containsKey('all_permissions')) {
@@ -136,17 +146,19 @@ class Location extends Api {
 
   Future<List?> get() async {
     try {
-      String url =this.baseUrl + this.apiUrl + "/business-location";
+      String url = this.baseUrl + this.apiUrl + "/business-location";
       var token = await System().getToken();
-      var response =
-          await http.get(Uri.parse(url), headers: this.getHeader('$token'));
+      var response = await http.get(
+        Uri.parse(url),
+        headers: this.getHeader('$token'),
+      );
       locations = jsonDecode(response.body);
 
       List? locationList = locations['data'];
-      
+
       List<Map<String, dynamic>> batchData = [];
       batchData.add({'key': 'location', 'value': jsonEncode(locationList)});
-      
+
       if (locationList != null) {
         locationList.forEach((element) {
           batchData.add({
@@ -169,14 +181,16 @@ class Business extends Api {
 
   Future<List> get() async {
     try {
-      String url =this.baseUrl + this.apiUrl + "/business-details";
+      String url = this.baseUrl + this.apiUrl + "/business-details";
       var token = await System().getToken();
-      var response =
-          await http.get(Uri.parse(url), headers: this.getHeader('$token'));
+      var response = await http.get(
+        Uri.parse(url),
+        headers: this.getHeader('$token'),
+      );
       business = jsonDecode(response.body);
       List businessDetails = [business['data']];
       await System().insert('business', jsonEncode(businessDetails));
-      
+
       // Auto-sync WhatsApp config from fetched business settings
       await Helper().syncWhatsAppFromBusinessSettings();
 
@@ -194,14 +208,18 @@ class ActiveSubscription extends Api {
     try {
       String url = this.baseUrl + this.apiUrl + "/active-subscription";
       var token = await System().getToken();
-      var response =
-          await http.get(Uri.parse(url), headers: this.getHeader('$token'));
+      var response = await http.get(
+        Uri.parse(url),
+        headers: this.getHeader('$token'),
+      );
       activeSubscription = jsonDecode(response.body);
       List activeSubscriptionDetails = (activeSubscription['data'].isNotEmpty)
           ? [activeSubscription['data']]
           : [];
-      System()
-          .insert('active-subscription', jsonEncode(activeSubscriptionDetails));
+      System().insert(
+        'active-subscription',
+        jsonEncode(activeSubscriptionDetails),
+      );
       return activeSubscriptionDetails;
     } catch (e) {
       return [];
@@ -213,10 +231,12 @@ class PaymentAccounts extends Api {
   Future<List> get() async {
     try {
       var accounts;
-      String url =this.baseUrl + this.apiUrl + "/payment-accounts";
+      String url = this.baseUrl + this.apiUrl + "/payment-accounts";
       var token = await System().getToken();
-      var response =
-          await http.get(Uri.parse(url), headers: this.getHeader('$token'));
+      var response = await http.get(
+        Uri.parse(url),
+        headers: this.getHeader('$token'),
+      );
       accounts = jsonDecode(response.body);
       List paymentAccounts = accounts['data'];
       System().insert('payment_accounts', jsonEncode(paymentAccounts));
