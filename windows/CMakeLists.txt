@@ -57,6 +57,17 @@ add_subdirectory("runner")
 # them to the application.
 include(flutter/generated_plugins.cmake)
 
+if(MSVC)
+  foreach(plugin_target IN ITEMS
+      local_auth_windows_plugin
+      permission_handler_windows_plugin)
+    if(TARGET ${plugin_target})
+      target_compile_definitions(${plugin_target} PRIVATE
+        _SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
+    endif()
+  endforeach()
+endif()
+
 
 # === Installation ===
 # Support files are copied into place next to the executable, so that it can
