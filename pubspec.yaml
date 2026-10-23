@@ -120,6 +120,10 @@ dependency_overrides:
 
 flutter_launcher_icons:
   android: true
+  windows:
+    generate: true
+    image_path: "assets/logo/Blue Modern Up Arrow Illustration Financial Business Logo (1).png"
+    icon_size: 256
   image_path: "assets/logo/Blue Modern Up Arrow Illustration Financial Business Logo (1).png"
 
 flutter_native_splash:
