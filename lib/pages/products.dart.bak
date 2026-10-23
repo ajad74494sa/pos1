@@ -1,0 +1,800 @@
+import 'dart:convert';
+import 'dart:async';
+
+import 'package:audioplayers/audioplayers.dart';
+import 'package:badges/badges.dart' as badges;
+import 'package:badges/badges.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/material.dart';
+import 'package:fluttertoast/fluttertoast.dart';
+import 'package:lottie/lottie.dart';
+import 'package:material_design_icons_flutter/material_design_icons_flutter.dart';
+import 'package:krpos/helpers/icons.dart';
+
+import '../helpers/AppTheme.dart';
+import '../helpers/SizeConfig.dart';
+import '../helpers/generators.dart';
+import '../helpers/otherHelpers.dart';
+import '../locale/MyLocalizations.dart';
+import '../models/product_model.dart';
+import '../models/sell.dart';
+import '../models/sellDatabase.dart';
+import '../models/system.dart';
+import '../models/variations.dart';
+import '../models/contact_model.dart';
+import 'elements.dart';
+
+class Products extends StatefulWidget {
+  const Products({Key? key}) : super(key: key);
+
+  @override
+  _ProductsState createState() => _ProductsState();
+}
+
+class _ProductsState extends State<Products> {
+  List products = [];
+  List<Map<String, dynamic>> cartItems = [];
+  static int themeType = 1;
+  ThemeData themeData = AppTheme.getThemeFromThemeMode(themeType);
+  bool changeLocation = false,
+      changePriceGroup = false,
+      canChangeLocation = true,
+      canMakeSell = false,
+      inStock = true,
+      gridView = true,
+      canAddSell = false,
+      canViewProducts = false,
+      usePriceGroup = true;
+  bool isLoadingProducts = false;
+
+  int selectedLocationId = 0,
+      categoryId = 0,
+      subCategoryId = 0,
+      brandId = 0,
+      cartCount = 0,
+      sellingPriceGroupId = 0,
+      offset = 0;
+  int? byAlphabets, byPrice;
+
+  String symbol = '';
+  final searchController = TextEditingController();
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final _filterFormKey = GlobalKey<FormState>();
+  final _searchFormKey = GlobalKey<FormState>();
+  ScrollController _scrollController = ScrollController();
+  Timer? _debounce;
+  List customers = [];
+  List<DropdownMenuItem<int>> _customerMenuItems = [];
+  int selectedCustomerId = 0;
+  Map? argument;
+  List<Map<dynamic, dynamic>> locationListMap = [
+    {'id': 0, 'name': 'All'}
+  ];
+  List<DropdownMenuItem<int>> _categoryMenuItems = [];
+  List<DropdownMenuItem<int>> _subCategoryMenuItems = [];
+  List<DropdownMenuItem<int>> _brandsMenuItems = [];
+  List<DropdownMenuItem<bool>> _priceGroupMenuItems = [];
+
+  @override
+  initState() {
+    super.initState();
+    getPermission();
+    _loadCustomers();
+    _scrollController.addListener(() {
+      if (_scrollController.position.pixels ==
+          _scrollController.position.maxScrollExtent) {
+        productList();
+      }
+    });
+    setLocationMap();
+    categoryList();
+    subCategoryList(categoryId);
+    brandList();
+    Helper().syncCallLogs();
+  }
+
+  _loadCustomers() async {
+    try {
+      var list = await Contact().get();
+      setState(() {
+        customers = list;
+        _customerMenuItems = [];
+        _customerMenuItems.add(DropdownMenuItem<int>(
+          child: Text('Walk-in Customer'),
+          value: 0,
+        ));
+        for (var c in customers) {
+          _customerMenuItems.add(DropdownMenuItem<int>(
+            child: SizedBox(
+              width: MySize.screenWidth! * 0.4,
+              child: Text('${c['name']}',
+                  softWrap: true, overflow: TextOverflow.ellipsis),
+            ),
+            value: c['id'],
+          ));
+        }
+      });
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  @override
+  Future<void> didChangeDependencies() async {
+    argument = ModalRoute.of(context)!.settings.arguments as Map?;
+    //Arguments sellId & locationId is send from edit.
+    if (argument != null) {
+      Future.delayed(Duration(milliseconds: 200), () {
+        if (this.mounted) {
+          setState(() {
+            selectedLocationId = argument!['locationId'];
+            canChangeLocation = false;
+          });
+        }
+      });
+    } else {
+      canChangeLocation = true;
+    }
+    await setInitDetails(selectedLocationId);
+    super.didChangeDependencies();
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    _debounce?.cancel();
+    super.dispose();
+  }
+
+  //Set location & product
+  setInitDetails(selectedLocationId) async {
+    //check subscription
+    var activeSubscriptionDetails = await System().get('active-subscription');
+    if (activeSubscriptionDetails.length > 0) {
+      setState(() {
+        canMakeSell = true;
+      });
+    } else {
+      Fluttertoast.showToast(
+          msg: AppLocalizations.of(context).translate('no_subscription_found'));
+    }
+    await Helper().getFormattedBusinessDetails().then((value) {
+      symbol = value['symbol'] + ' ';
+    });
+    await setDefaultLocation(selectedLocationId);
+    products = [];
+    offset = 0;
+    productList();
+  }
+
+  //Fetch permission from database
+  getPermission() async {
+    if (await Helper().getPermission("direct_sell.access")) {
+      canAddSell = true;
+    }
+    if (await Helper().getPermission("product.view")) {
+      canViewProducts = true;
+    }
+  }
+
+  //set selling Price Group Id
+  findSellingPriceGroupId(locId) {
+    if (usePriceGroup) {
+      locationListMap.forEach((element) {
+        if (element['id'] == selectedLocationId &&
+            element['selling_price_group_id'] != null) {
+          sellingPriceGroupId =
+              int.parse(element['selling_price_group_id'].toString());
+        } else if (element['id'] == selectedLocationId &&
+            element['selling_price_group_id'] == null) {
+          sellingPriceGroupId = 0;
+        }
+      });
+    } else {
+      sellingPriceGroupId = 0;
+    }
+  }
+
+  //set product list
+  productList() async {
+    if (isLoadingProducts) return;
+    isLoadingProducts = true;
+    offset++;
+    //check last sync, if difference is 10 minutes then sync again.
+    String? lastSync = await System().getProductLastSync();
+    final date2 = DateTime.now();
+    if (lastSync == null ||
+        (date2.difference(DateTime.parse(lastSync)).inMinutes > 10)) {
+      if (await Helper().checkConnectivity()) {
+        await Variations().refresh();
+        await System().insertProductLastSyncDateTimeNow();
+      }
+    }
+
+    findSellingPriceGroupId(selectedLocationId);
+    await Variations()
+        .get(
+            brandId: brandId,
+            categoryId: categoryId,
+            subCategoryId: subCategoryId,
+            inStock: inStock,
+            locationId: selectedLocationId,
+            searchTerm: searchController.text,
+            offset: offset,
+            byAlphabets: byAlphabets,
+            byPrice: byPrice)
+        .then((element) {
+      element.forEach((product) {
+        var price;
+        if (product['selling_price_group'] != null) {
+          jsonDecode(product['selling_price_group']).forEach((element) {
+            if (element['key'] == sellingPriceGroupId) {
+              price = double.parse(element['value'].toString());
+            }
+          });
+        }
+        setState(() {
+          products.add(ProductModel().product(product, price));
+        });
+      });
+    }).whenComplete(() {
+      setState(() {
+        isLoadingProducts = false;
+      });
+    });
+  }
+
+  categoryList() async {
+    List categories = await System().getCategories();
+
+    _categoryMenuItems.add(
+      DropdownMenuItem(
+        child: Text(AppLocalizations.of(context).translate('select_category')),
+        value: 0,
+      ),
+    );
+
+    for (var category in categories) {
+      _categoryMenuItems.add(
+        DropdownMenuItem(
+          child: Text(category['name']),
+          value: category['id'],
+        ),
+      );
+    }
+  }
+
+  subCategoryList(parentId) async {
+    List subCategories = await System().getSubCategories(parentId);
+    _subCategoryMenuItems = [];
+    _subCategoryMenuItems.add(
+      DropdownMenuItem(
+        child:
+            Text(AppLocalizations.of(context).translate('select_sub_category')),
+        value: 0,
+      ),
+    );
+    subCategories.forEach((element) {
+      _subCategoryMenuItems.add(
+        DropdownMenuItem(
+          child: Text(jsonDecode(element['value'])['name']),
+          value: jsonDecode(element['value'])['id'],
+        ),
+      );
+    });
+  }
+
+  brandList() async {
+    List brands = await System().getBrands();
+
+    _brandsMenuItems.add(
+      DropdownMenuItem(
+        child: Text(AppLocalizations.of(context).translate('select_brand')),
+        value: 0,
+      ),
+    );
+
+    for (var brand in brands) {
+      _brandsMenuItems.add(
+        DropdownMenuItem(
+          child: Text(brand['name']),
+          value: brand['id'],
+        ),
+      );
+    }
+  }
+
+  priceGroupList() async {
+    List<DropdownMenuItem<bool>> tmp = [];
+    tmp.add(
+      DropdownMenuItem<bool>(
+        child: Text(
+            AppLocalizations.of(context).translate('no_price_group_selected')),
+        value: false,
+      ),
+    );
+
+    bool addedDefault = false;
+    for (var element in locationListMap) {
+      if (!addedDefault &&
+          element['id'] == selectedLocationId &&
+          element['selling_price_group_id'] != null) {
+        tmp.add(
+          DropdownMenuItem<bool>(
+            child: Text(
+                AppLocalizations.of(context).translate('default_price_group')),
+            value: true,
+          ),
+        );
+        addedDefault = true;
+      }
+    }
+
+    // Deduplicate by value to guarantee exactly one item per value
+    List<DropdownMenuItem<bool>> deduped = [];
+    Set seen = Set();
+    for (var item in tmp) {
+      if (!seen.contains(item.value)) {
+        deduped.add(item);
+        seen.add(item.value);
+      }
+    }
+    setState(() {
+      _priceGroupMenuItems = deduped;
+    });
+  }
+
+  Future<String> getCartItemCount({isCompleted, sellId}) async {
+    var counts =
+        await Sell().cartItemCount(isCompleted: isCompleted, sellId: sellId);
+    setState(() {
+      cartCount = int.parse(counts);
+    });
+    return counts;
+  }
+
+  double findAspectRatio(double width) {
+    //Logic for aspect ratio of grid view
+    return (width / 2 - MySize.size24!) / ((width / 2 - MySize.size24!) + 60);
+  }
+
+  double getCartTotal() {
+    double total = 0;
+    cartItems.forEach((item) {
+      total += (item['unit_price'] ?? 0) * (item['quantity'] ?? 1);
+    });
+    return total;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    themeData = Theme.of(context);
+
+    return SafeArea(
+      child: Scaffold(
+        key: _scaffoldKey,
+        resizeToAvoidBottomInset: false,
+        backgroundColor: Colors.white,
+        endDrawer: _filterDrawer(),
+        appBar: AppBar(
+          elevation: 0,
+          title: Text(AppLocalizations.of(context).translate('products'),
+              style: AppTheme.getTextStyle(themeData.textTheme.headline6,
+                  fontWeight: 600)),
+          leading: null,
+          actions: <Widget>[
+            locations(),
+          ],
+        ),
+        body: (canViewProducts)
+            ? Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Left: Cart / checkout area (design like screenshot)
+                  Container(
+                    width: MediaQuery.of(context).size.width * 0.4,
+                    color: Colors.white,
+                    padding: EdgeInsets.all(MySize.size16!),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Cart table header
+                        Container(
+                          padding: EdgeInsets.symmetric(
+                              vertical: MySize.size8!, horizontal: 8),
+                          decoration: BoxDecoration(
+                              color: Color(0xfffafafa),
+                              borderRadius: BorderRadius.circular(8)),
+                          child: Row(
+                            children: [
+                              Expanded(child: Text('Product')),
+                              SizedBox(width: 80, child: Text('Quantity')),
+                              SizedBox(width: 120, child: Text('Subtotal')),
+                              SizedBox(width: 40, child: Icon(Icons.close))
+                            ],
+                          ),
+                        ),
+                        // Cart items area (shows list or empty state)
+                        Expanded(
+                          child: Container(
+                            margin: EdgeInsets.only(top: MySize.size12!),
+                            decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(8)),
+                            child: cartItems.isEmpty
+                                ? Center(
+                                    child: Text(AppLocalizations.of(context)
+                                        .translate('no_items_added_to_cart')))
+                                : ListView.separated(
+                                    padding: EdgeInsets.all(8),
+                                    itemCount: cartItems.length,
+                                    itemBuilder: (context, idx) {
+                                      var it = cartItems[idx];
+                                      return Row(
+                                        children: [
+                                          Expanded(
+                                              child: Text(it['display_name'])),
+                                          SizedBox(
+                                            width: 120,
+                                            child: Row(
+                                              mainAxisAlignment:
+                                                  MainAxisAlignment.center,
+                                              children: [
+                                                IconButton(
+                                                  icon: Icon(Icons
+                                                      .remove_circle_outline),
+                                                  visualDensity:
+                                                      VisualDensity.compact,
+                                                  padding: EdgeInsets.zero,
+                                                  onPressed: () {
+                                                    setState(() {
+                                                      int q = (it['quantity'] ??
+                                                          1) as int;
+                                                      if (q > 1) {
+                                                        it['quantity'] = q - 1;
+                                                      } else {
+                                                        cartItems.removeAt(idx);
+                                                      }
+                                                    });
+                                                  },
+                                                ),
+                                                Padding(
+                                                  padding: EdgeInsets.symmetric(
+                                                      horizontal: 8),
+                                                  child: Text(
+                                                      '${it['quantity'] ?? 1}'),
+                                                ),
+                                                IconButton(
+                                                  icon: Icon(
+                                                      Icons.add_circle_outline),
+                                                  visualDensity:
+                                                      VisualDensity.compact,
+                                                  padding: EdgeInsets.zero,
+                                                  onPressed: () {
+                                                    setState(() {
+                                                      int q = (it['quantity'] ??
+                                                          1) as int;
+                                                      it['quantity'] = q + 1;
+                                                    });
+                                                  },
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          SizedBox(
+                                              width: 120,
+                                              child: Text(
+                                                  '${symbol}${((it['unit_price'] ?? 0) * (it['quantity'] ?? 1)).toStringAsFixed(2)}')),
+                                          SizedBox(
+                                            width: 40,
+                                            child: IconButton(
+                                              icon: Icon(Icons.delete_outline),
+                                              onPressed: () {
+                                                setState(() {
+                                                  cartItems.removeAt(idx);
+                                                });
+                                              },
+                                            ),
+                                          ),
+                                        ],
+                                      );
+                                    },
+                                    separatorBuilder: (_, __) => Divider(),
+                                  ),
+                          ),
+                        ),
+
+                        // Summary and actions
+                        SizedBox(height: MySize.size12!),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text('Items: ${cartItems.length}'),
+                            Text(
+                                'Total: ${symbol}${getCartTotal().toStringAsFixed(2)}'),
+                          ],
+                        ),
+                        SizedBox(height: MySize.size12!),
+                        Visibility(
+                          visible: cartItems.isNotEmpty,
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: ElevatedButton(
+                                  onPressed: () async {
+                                    // Persist in-memory cart to local DB so checkout has sell lines
+                                    try {
+                                      Map<String, dynamic> sellData =
+                                          await Sell().createSell(
+                                              invoiceNo: 'POS_' +
+                                                  DateTime.now()
+                                                      .millisecondsSinceEpoch
+                                                      .toString(),
+                                              transactionDate: DateTime.now()
+                                                  .toIso8601String(),
+                                              contactId: selectedCustomerId,
+                                              locId: selectedLocationId,
+                                              discountAmount: 0.0,
+                                              discountType: null,
+                                              invoiceAmount: getCartTotal(),
+                                              changeReturn: 0.0,
+                                              pending: 0.0,
+                                              saleStatus: 'draft');
+
+                                      var sellId = await SellDatabase()
+                                          .storeSell(sellData);
+                                      for (var item in cartItems) {
+                                        await Sell().addToCart(item, sellId);
+                                      }
+
+                                      Navigator.pushNamed(context, '/cart',
+                                          arguments: Helper().argument(
+                                              locId: selectedLocationId,
+                                              invoiceAmount: getCartTotal(),
+                                              sellId: sellId));
+                                    } catch (e) {
+                                      Fluttertoast.showToast(msg: '$e');
+                                    }
+                                  },
+                                  style: ElevatedButton.styleFrom(
+                                      backgroundColor: Color(0xff4c53a5)),
+                                  child: Text('Select Customer'),
+                                ),
+                              ),
+                              SizedBox(width: MySize.size8!),
+                              Expanded(
+                                child: ElevatedButton(
+                                  onPressed: () async {
+                                    try {
+                                      Map<String, dynamic> sellData =
+                                          await Sell().createSell(
+                                              invoiceNo: 'POS_' +
+                                                  DateTime.now()
+                                                      .millisecondsSinceEpoch
+                                                      .toString(),
+                                              transactionDate: DateTime.now()
+                                                  .toIso8601String(),
+                                              contactId: selectedCustomerId,
+                                              locId: selectedLocationId,
+                                              discountAmount: 0.0,
+                                              discountType: null,
+                                              invoiceAmount: getCartTotal(),
+                                              changeReturn: 0.0,
+                                              pending: 0.0,
+                                              saleStatus: 'draft');
+
+                                      var sellId = await SellDatabase()
+                                          .storeSell(sellData);
+                                      for (var item in cartItems) {
+                                        await Sell().addToCart(item, sellId);
+                                      }
+
+                                      Navigator.pushNamed(context, '/checkout',
+                                          arguments: Helper().argument(
+                                              invoiceAmount: getCartTotal(),
+                                              customerId: selectedCustomerId,
+                                              locId: selectedLocationId,
+                                              sellId: sellId));
+                                    } catch (e) {
+                                      Fluttertoast.showToast(msg: '$e');
+                                    }
+                                  },
+                                  style: ElevatedButton.styleFrom(
+                                      backgroundColor: Color(0xff2196f3)),
+                                  child: Text('Pay & Checkout'),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        SizedBox(height: MySize.size8!),
+                        SizedBox(height: MySize.size12!),
+                      ],
+                    ),
+                  ),
+
+                  // Right: product grid and filters
+                  VerticalDivider(width: 1),
+                  Expanded(
+                    child: Container(
+                      padding: EdgeInsets.all(MySize.size8!),
+                      color: Color(0xfff5f5f5),
+                      child: (selectedLocationId == 0)
+                          ? Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.location_on),
+                                  Text(AppLocalizations.of(context)
+                                      .translate('please_set_a_location')),
+                                ],
+                              ),
+                            )
+                          : _productsList(),
+                    ),
+                  )
+                ],
+              )
+            : Center(
+                child: Text(
+                  AppLocalizations.of(context).translate('unauthorised'),
+                  style: TextStyle(color: Colors.black),
+                ),
+              ),
+      ),
+    );
+  }
+
+  Widget _filterDrawer() {
+    return Container(
+      width: MediaQuery.of(context).size.width * 0.8,
+      padding: EdgeInsets.only(bottom: MySize.size14!),
+      color: Colors.white,
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Container(
+              padding:
+                  EdgeInsets.only(top: MySize.size24!, bottom: MySize.size24!),
+              alignment: Alignment.center,
+              child: Center(
+                child: Text(
+                  AppLocalizations.of(context).translate('sort'),
+                  style: AppTheme.getTextStyle(themeData.textTheme.subtitle1,
+                      fontWeight: 700, color: themeData.colorScheme.primary),
+                ),
+              ),
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    InkWell(
+                      onTap: () async {
+                        setState(() {
+                          if (byAlphabets == null) {
+                            byAlphabets = 0;
+                          } else if (byAlphabets == 0) {
+                            byAlphabets = 1;
+                          } else {
+                            byAlphabets = null;
+                          }
+                        });
+                        products = [];
+                        offset = 0;
+                        productList();
+                      },
+                      child: Container(
+                        margin: EdgeInsets.only(left: MySize.size16!),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius:
+                              BorderRadius.all(Radius.circular(MySize.size16!)),
+                          boxShadow: [
+                            BoxShadow(
+                              color: themeData.cardTheme.shadowColor!
+                                  .withAlpha(48),
+                              blurRadius: (byAlphabets != null) ? 5 : 0,
+                              offset: (byAlphabets != null)
+                                  ? Offset(3, 3)
+                                  : Offset(0, 0),
+                            )
+                          ],
+                          // : null,
+                        ),
+                        padding: EdgeInsets.all(MySize.size12!),
+                        child: Row(
+                          children: [
+                            Text(
+                              "A",
+                              style: AppTheme.getTextStyle(
+                                  themeData.textTheme.subtitle1,
+                                  fontWeight: 700,
+                                  color: (byAlphabets != null)
+                                      ? themeData.colorScheme.primary
+                                      : Colors.grey),
+                            ),
+                            Icon(
+                              (byAlphabets == 1)
+                                  ? MdiIcons.arrowLeftBold
+                                  : MdiIcons.arrowRightBold,
+                              color: (byAlphabets != null)
+                                  ? themeData.colorScheme.primary
+                                  : Colors.grey,
+                              size: 22,
+                            ),
+                            Text(
+                              "Z",
+                              style: AppTheme.getTextStyle(
+                                  themeData.textTheme.subtitle1,
+                                  fontWeight: 700,
+                                  color: (byAlphabets != null)
+                                      ? themeData.colorScheme.primary
+                                      : Colors.grey),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    InkWell(
+                      onTap: () async {
+                        setState(() {
+                          if (byPrice == null) {
+                            byPrice = 0;
+                          } else if (byPrice == 0) {
+                            byPrice = 1;
+                          } else {
+                            byPrice = null;
+                          }
+                        });
+                        products = [];
+                        offset = 0;
+                        productList();
+                      },
+                      child: Container(
+                        margin: EdgeInsets.only(left: MySize.size16!),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius:
+                              BorderRadius.all(Radius.circular(MySize.size16!)),
+                          boxShadow: [
+                            BoxShadow(
+                              color: themeData.cardTheme.shadowColor!
+                                  .withAlpha(48),
+                              blurRadius: (byPrice != null) ? 5 : 0,
+                              offset: (byPrice != null)
+                                  ? Offset(3, 3)
+                                  : Offset(0, 0),
+                            )
+                          ],
+                          // : null,
+                        ),
+                        padding: EdgeInsets.all(MySize.size12!),
+                        child: Row(
+                          children: [
+                            Text(
+                              AppLocalizations.of(context).translate('price'),
+                              style: AppTheme.getTextStyle(
+                                  themeData.textTheme.subtitle1,
+                                  fontWeight: 700,
+                                  color: (byPrice != null)
+                                      ? themeData.colorScheme.primary
+                                      : Colors.grey),
+                            ),
+                            Icon(
+                              (byPrice == 1)
+                                  ? MdiIcons.arrowDownBold
+                                  : MdiIcons.arrowUpBold,
+                              color: (byPrice != null)
+                                  ? themeData.colorScheme.primary
+                                  : Colors.grey,
+                              size: 22,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
