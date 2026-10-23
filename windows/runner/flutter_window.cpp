@@ -2,6 +2,8 @@
 
 #include <optional>
 
+#include <desktop_multi_window/desktop_multi_window_plugin.h>
+
 #include "flutter/generated_plugin_registrant.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
